@@ -17,7 +17,7 @@ def log_message(text):
 
 
 def fetch_hourly_gold_data():
-  url = "https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X?range=5d&interval=1h"
+  url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=1h"
   headers = {"User-Agent": "Mozilla/5.0"}
   try:
     response = requests.get(url, headers=headers, timeout=10)
@@ -27,6 +27,7 @@ def fetch_hourly_gold_data():
     timestamps = result["timestamp"]
 
     cleaned = [(ts, c) for ts, c in zip(timestamps, closes) if c is not None]
+    cleaned = [(ts, c - 26) for ts, c in cleaned]  # GC=F $3898 -26 = $3872 spot = your MT5!
     return zip(*cleaned)
   except Exception as e:
     log_message(f"Error fetching data: {e}")
