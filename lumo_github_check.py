@@ -45,7 +45,7 @@ def load_balance():
   if os.path.exists(BALANCE_FILE):
     with open(BALANCE_FILE, "r") as f:
       return json.load(f)
-  return {"balance": 0.0, "wins": 0, "losses": 0, "total_trades": 0}
+  return {"balance": 100.00, "wins": 0, "losses": 0, "total_trades": 0}
 
 def save_balance(data):
   with open(BALANCE_FILE, "w") as f:
