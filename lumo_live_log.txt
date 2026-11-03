@@ -4,3 +4,4 @@
 [2026-11-03 04:37:42 UTC] M5 Check @ $3909.60 | London Time: 04:25 | 50-MA: $3927.97 | Lot: 0.02 | Bal: $95.40
 [2026-11-03 05:26:39 UTC] Not enough M5 candles available.
 [2026-11-03 05:30:33 UTC] Not enough M5 candles available.
+[2026-11-03 06:26:54 UTC] Not enough M5 candles available.
