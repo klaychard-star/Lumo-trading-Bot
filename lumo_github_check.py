@@ -270,6 +270,5 @@ def run_single_check():
   save_active_trades(updated_active)
   save_balance(balance_data)
 
-
 if __name__ == "__main__":
   run_single_check()
