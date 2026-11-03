@@ -209,6 +209,11 @@ def run_single_check():
     ref_level = c1_close
     c1_size = c1_high - c1_low
     
+    # Safely pre-initialize trade variables to prevent NameError scope crashes
+    entry_price = None
+    tp_price = None
+    sl_price = None
+    
     if trend_is_bullish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
@@ -235,7 +240,7 @@ def run_single_check():
           tp_price = entry_price - c1_size
           sl_price = c1_open + (c1_size * 0.5)
 
-    if side:
+    if side and entry_price is not None:
       recent_entry_exists = any((timestamps[i] - t["entry_timestamp"]) < 900 for t in active_trades + updated_active)
       
       if not recent_entry_exists:
