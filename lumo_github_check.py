@@ -9,7 +9,8 @@ LOG_FILE = "lumo_live_log.txt"
 STATE_FILE = "lumo_active_trades.json"
 BALANCE_FILE = "lumo_balance.json"
 SPREAD_COST = 0.60
-BASE_LOT = 0.01  # $1 per $1 baseline
+BASE_LOT = 0.01  # $1 per $1 movement baseline
+INITIAL_BALANCE = 100.00
 
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -23,52 +24,60 @@ def log_message(text):
 
 def get_lot(balance):
   lot = int(balance // 100) * 0.02
-  if lot < 0.02: lot = 0.02
-  if lot > 2.0: lot = 2.0  # safety cap
+  if lot < 0.02:
+    lot = 0.02
+  if lot > 2.0:
+    lot = 2.0  # Maximum safety cap set to 2.0 lots
   return lot
 
-def fetch_m5_gold_data():
-  url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=5m"
+def fetch_yahoo_m5_data():
+  url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m"
   headers = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      )
   }
   try:
-    response = requests.get(url, headers=headers, timeout=10)
+    # 5-second timeout so it never hangs GitHub Actions
+    response = requests.get(url, headers=headers, timeout=5)
     response.raise_for_status()
     data = response.json()
-    
+
     result = data.get("chart", {}).get("result")
     if not result:
       log_message("Invalid data structure received from Yahoo Finance.")
       return [], [], [], [], []
-      
+
     indicators = result[0].get("indicators", {})
     quote = indicators.get("quote", [{}])[0]
-    
+
     opens = quote.get("open", [])
     highs = quote.get("high", [])
     lows = quote.get("low", [])
     closes = quote.get("close", [])
     timestamps = result[0].get("timestamp", [])
-    
+
     valid_data = [
-        (ts, o, h, l, c) for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes)
+        (ts, o, h, l, c)
+        for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes)
         if o is not None and h is not None and l is not None and c is not None
     ]
-    
+
     if not valid_data:
       return [], [], [], [], []
-      
-    timestamps, opens, highs, lows, closes = zip(*valid_data)
-    
-    opens = [o - 26 for o in opens]
-    highs = [h - 26 for h in highs]
-    lows = [l - 26 for l in lows]
-    closes = [c - 26 for c in closes]
-    
-    return list(timestamps), list(opens), list(highs), list(lows), list(closes)
+
+    ts_list, o_list, h_list, l_list, c_list = zip(*valid_data)
+
+    # Apply -26 spot offset for Gold futures estimation
+    o_list = [x - 26 for x in o_list]
+    h_list = [x - 26 for x in h_list]
+    l_list = [x - 26 for x in l_list]
+    c_list = [x - 26 for x in c_list]
+
+    return list(ts_list), list(o_list), list(h_list), list(l_list), list(c_list)
   except Exception as e:
-    log_message(f"Error fetching M5 data: {e}")
+    log_message(f"Error fetching data: {e}")
     return [], [], [], [], []
 
 def save_json_atomically(filename, data):
@@ -101,12 +110,10 @@ def load_balance():
     except Exception as e:
       log_message(f"Error reading balance file: {e}")
   return {
-      "balance": 100.00,
+      "balance": INITIAL_BALANCE,
       "wins": 0,
       "losses": 0,
-      "total_trades": 0,
-      "daily_losses": 0,
-      "last_loss_date": ""
+      "total_trades": 0
   }
 
 def save_balance(data):
@@ -119,12 +126,12 @@ def run_single_check():
   except Exception:
     dt_london = now_utc
 
-  # Check Weekend
+  # Weekend protection (Monday = 0, Sunday = 6)
   if now_utc.weekday() >= 5:
     log_message("🛡️ Weekend detected. Market closed — exiting.")
     return
 
-  # Check London Session Hours (06:00 to 18:00)
+  # London Session Hours (06:00 to 18:00 UTC)
   if not (6 <= dt_london.hour <= 18):
     log_message(f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) — exiting.")
     return
@@ -135,34 +142,38 @@ def run_single_check():
     log_message(f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
     return
 
-  timestamps, opens, highs, lows, closes = fetch_m5_gold_data()
-  
-  if len(closes) < 60:
-    log_message("Not enough M5 candles available.")
+  timestamps, opens, highs, lows, closes = fetch_yahoo_m5_data()
+
+  if len(closes) < 100:
+    log_message("❌ Error: Not enough data fetched to evaluate strategy.")
     return
 
   i = len(closes) - 2
-  current_price = closes[-1]
-  
-  avg50 = sum(closes[i-50:i]) / 50
-  trend_is_bullish = closes[i] > avg50
-  trend_is_bearish = closes[i] < avg50
+  current_high = highs[i]
+  current_low = lows[i]
+  current_price = closes[i]
 
-  c1_open, c1_high, c1_low, c1_close = opens[i-2], highs[i-2], lows[i-2], closes[i-2]
-  c2_open, c2_high, c2_low, c2_close = opens[i-1], highs[i-1], lows[i-1], closes[i-1]
-  c3_open, c3_high, c3_low, c3_close = opens[i], highs[i], lows[i], closes[i]
+  # 50-period Moving Average trend baseline
+  avg50 = sum(closes[i - 50 : i]) / 50
 
-  dt_utc = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
-
-  current_date_str = dt_utc.strftime("%Y-%m-%d")
-  if balance_data.get("last_loss_date") != current_date_str:
-    balance_data["daily_losses"] = 0
-    balance_data["last_loss_date"] = current_date_str
-
-  if balance_data.get("daily_losses", 0) >= 2:
-    log_message("🛑 MAX DAILY LOSS REACHED: 2 losses recorded today. Bot is resting until tomorrow.")
-    save_balance(balance_data)
-    return
+  c1_open, c1_high, c1_low, c1_close = (
+      opens[i - 2],
+      highs[i - 2],
+      lows[i - 2],
+      closes[i - 2],
+  )
+  c2_open, c2_high, c2_low, c2_close = (
+      opens[i - 1],
+      highs[i - 1],
+      lows[i - 1],
+      closes[i - 1],
+  )
+  c3_open, c3_high, c3_low, c3_close = (
+      opens[i],
+      highs[i],
+      lows[i],
+      closes[i],
+  )
 
   current_lot = get_lot(balance_data["balance"])
   log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}")
@@ -170,55 +181,57 @@ def run_single_check():
   active_trades = load_active_trades()
   updated_active = []
 
+  # --- 1. MANAGE ACTIVE POSITIONS ---
   for trade in active_trades:
-    trade["candles_held"] += 1
     side = trade["side"]
-    entry_price = trade["entry_price"]
-    t_lot = trade.get("lot", 0.02)
-    tp_price = trade["tp_price"]
-    sl_price = trade["sl_price"]
-    
-    pnl = (current_price - entry_price) if side == "BUY" else (entry_price - current_price)
-    
-    tp_hit = (current_price >= tp_price) if side == "BUY" else (current_price <= tp_price)
-    sl_hit = (current_price <= sl_price) if side == "BUY" else (current_price >= sl_price)
-    
+    entry = trade["entry"]
+    tp = trade["tp"]
+    sl = trade["sl"]
+    lot = trade["lot"]
+
+    tp_hit = current_high >= tp if side == "BUY" else current_low <= tp
+    sl_hit = current_low <= sl if side == "BUY" else current_high >= sl
+
     if tp_hit or sl_hit:
-      if tp_hit:
-        realized_pnl_pips = abs(tp_price - entry_price)
+      if sl_hit and not tp_hit:
+        realized_pips = -abs(entry - sl)
+        is_win = False
       else:
-        realized_pnl_pips = -abs(entry_price - sl_price)
-        
-      net_pnl = (realized_pnl_pips * (t_lot / BASE_LOT)) - SPREAD_COST
+        realized_pips = abs(tp - entry)
+        is_win = True
+
+      net_pnl = (realized_pips * (lot / BASE_LOT)) - SPREAD_COST
       balance_data["balance"] += net_pnl
       balance_data["total_trades"] += 1
-      
-      if tp_hit:
+
+      if is_win:
         balance_data["wins"] += 1
-        log_message(f"✅ WIN CLOSED #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} -> TP hit @ ${current_price:.2f} | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(f"✅ WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
       else:
-        balance_data["losses"] += 1
-        balance_data["daily_losses"] = balance_data.get("daily_losses", 0) + 1
-        log_message(f"❌ LOSS CLOSED #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} -> SL hit @ ${current_price:.2f} | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        balance_data["losses"] = balance_data.get("losses", 0) + 1
+        log_message(f"❌ LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
     else:
       updated_active.append(trade)
-      log_message(f"⏳ HOLDING #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} | PnL Pips: ${pnl:+.2f} | Held: {trade['candles_held']} M5s")
+      log_message(f"⏳ HOLDING active trade: {side} @ ${entry:.2f}")
 
-  if len(updated_active) < 1:
-    side = None
+  # --- 2. IDENTIFY NEW 3-CANDLE SETUPS ---
+  if not updated_active:
+    trend_is_bullish = closes[i] > avg50
+    trend_is_bearish = closes[i] < avg50
+
     ref_level = c1_close
     c1_size = c1_high - c1_low
-    
-    # Safely pre-initialize trade variables to prevent NameError scope crashes
-    entry_price = None
-    tp_price = None
-    sl_price = None
-    
+    side = None
+    entry_price, tp_price, sl_price = None, None, None
+
+    # Bullish Entry Logic
     if trend_is_bullish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
-      body_above_line = c2_body_min >= ref_level or (c2_body_min <= ref_level and c2_body_max >= ref_level)
-      
+      body_above_line = c2_body_min >= ref_level or (
+          c2_body_min <= ref_level and c2_body_max >= ref_level
+      )
+
       if body_above_line:
         tapped_level = c3_low <= ref_level <= c3_high
         if tapped_level:
@@ -227,11 +240,14 @@ def run_single_check():
           tp_price = entry_price + c1_size
           sl_price = c1_open - (c1_size * 0.5)
 
+    # Bearish Entry Logic
     elif trend_is_bearish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
-      body_below_line = c2_body_max <= ref_level or (c2_body_min <= ref_level and c2_body_max >= ref_level)
-      
+      body_below_line = c2_body_max <= ref_level or (
+          c2_body_min <= ref_level and c2_body_max >= ref_level
+      )
+
       if body_below_line:
         tapped_level = c3_low <= ref_level <= c3_high
         if tapped_level:
@@ -241,24 +257,19 @@ def run_single_check():
           sl_price = c1_open + (c1_size * 0.5)
 
     if side and entry_price is not None:
-      recent_entry_exists = any((timestamps[i] - t["entry_timestamp"]) < 900 for t in active_trades + updated_active)
-      
-      if not recent_entry_exists:
-        new_trade = {
-            "id": int(timestamps[i]),
-            "side": side,
-            "entry_price": entry_price,
-            "tp_price": tp_price,
-            "sl_price": sl_price,
-            "entry_timestamp": timestamps[i],
-            "candles_held": 0,
-            "lot": current_lot
-        }
-        updated_active.append(new_trade)
-        log_message(f"🚀 NEW 3-CANDLE SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f}) | Bal ${balance_data['balance']:.2f}")
+      new_trade = {
+          "side": side,
+          "entry": entry_price,
+          "tp": tp_price,
+          "sl": sl_price,
+          "lot": current_lot,
+      }
+      updated_active.append(new_trade)
+      log_message(f"🚀 NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
 
   save_active_trades(updated_active)
   save_balance(balance_data)
+
 
 if __name__ == "__main__":
   run_single_check()
