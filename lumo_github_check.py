@@ -12,6 +12,7 @@ SPREAD_COST = 0.60
 BASE_LOT = 0.01  # $1 per $1 movement baseline
 INITIAL_BALANCE = 100.00
 
+
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
   formatted_text = f"[{timestamp}] {text}"
@@ -22,6 +23,7 @@ def log_message(text):
   except Exception as e:
     print(f"[{timestamp}] Error writing to log file: {e}")
 
+
 def get_lot(balance):
   lot = int(balance // 100) * 0.02
   if lot < 0.02:
@@ -29,6 +31,7 @@ def get_lot(balance):
   if lot > 2.0:
     lot = 2.0  # Maximum safety cap set to 2.0 lots
   return lot
+
 
 def fetch_yahoo_m5_data():
   url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m"
@@ -80,6 +83,7 @@ def fetch_yahoo_m5_data():
     log_message(f"Error fetching data: {e}")
     return [], [], [], [], []
 
+
 def save_json_atomically(filename, data):
   dir_name = os.path.dirname(filename) or "."
   try:
@@ -90,6 +94,7 @@ def save_json_atomically(filename, data):
   except Exception as e:
     log_message(f"Error saving {filename} atomically: {e}")
 
+
 def load_active_trades():
   if os.path.exists(STATE_FILE):
     try:
@@ -99,8 +104,10 @@ def load_active_trades():
       log_message(f"Error reading active trades state: {e}")
   return []
 
+
 def save_active_trades(trades):
   save_json_atomically(STATE_FILE, trades)
+
 
 def load_balance():
   if os.path.exists(BALANCE_FILE):
@@ -113,11 +120,13 @@ def load_balance():
       "balance": INITIAL_BALANCE,
       "wins": 0,
       "losses": 0,
-      "total_trades": 0
+      "total_trades": 0,
   }
+
 
 def save_balance(data):
   save_json_atomically(BALANCE_FILE, data)
+
 
 def run_single_check():
   now_utc = datetime.now(timezone.utc)
@@ -133,13 +142,19 @@ def run_single_check():
 
   # London Session Hours (06:00 to 18:00 UTC)
   if not (6 <= dt_london.hour <= 18):
-    log_message(f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) — exiting.")
+    log_message(
+        f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) —"
+        " exiting."
+    )
     return
 
   balance_data = load_balance()
-  
+
   if balance_data["balance"] < 20.00:
-    log_message(f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
+    log_message(
+        f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below"
+        " $20.00 safety threshold. Trading halted."
+    )
     return
 
   timestamps, opens, highs, lows, closes = fetch_yahoo_m5_data()
@@ -176,7 +191,11 @@ def run_single_check():
   )
 
   current_lot = get_lot(balance_data["balance"])
-  log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}")
+  log_message(
+      f"M5 Check @ ${current_price:.2f} | London Time:"
+      f" {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot:"
+      f" {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}"
+  )
 
   active_trades = load_active_trades()
   updated_active = []
@@ -206,10 +225,16 @@ def run_single_check():
 
       if is_win:
         balance_data["wins"] += 1
-        log_message(f"✅ WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(
+            f"✅ WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net:"
+            f" ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}"
+        )
       else:
         balance_data["losses"] = balance_data.get("losses", 0) + 1
-        log_message(f"❌ LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(
+            f"❌ LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net:"
+            f" ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}"
+        )
     else:
       updated_active.append(trade)
       log_message(f"⏳ HOLDING active trade: {side} @ ${entry:.2f}")
@@ -265,10 +290,14 @@ def run_single_check():
           "lot": current_lot,
       }
       updated_active.append(new_trade)
-      log_message(f"🚀 NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
+      log_message(
+          f"🚀 NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f}"
+          f" (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})"
+      )
 
   save_active_trades(updated_active)
   save_balance(balance_data)
+
 
 if __name__ == "__main__":
   run_single_check()
