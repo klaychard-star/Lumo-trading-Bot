@@ -1,41 +1,33 @@
-name: Lumo Trading Bot
+name: LUMO Live Bot
 
 on:
+  repository_dispatch:
+    types: [run_lumo_bot]
   schedule:
-    - cron: '*/5 6-18 * * 1-5'
-  workflow_dispatch: {}
+    - cron: '*/5 * * * *' # Keeps the native cron running as a backup
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
+      - name: Install dependencies
+        run: pip install requests
 
-      - name: Run Trading Bot
-        run: python lumo_bot.py
-        env:
-          METAPI_TOKEN: ${{ secrets.METAPI_TOKEN }}
-          METATRADER_ACCOUNT_ID: ${{ secrets.METATRADER_ACCOUNT_ID }}
+      - name: Run LUMO Bot
+        run: python lumo.py
 
-      - name: Commit and Push State
+      - name: Commit state updates
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f lumo_active_trades.json lumo_balance.json lumo_live_log.txt || true
-          git diff --staged --quiet || git commit -m "🤖 Lumo bot state update [skip ci]"
+          git config --global user.name "LUMO Bot"
+          git config --global user.email "bot@users.noreply.github.com"
+          git add lumo_active_trades.json lumo_balance.json lumo_live_log.txt
+          git commit -m "Auto-update bot state [skip ci]" || echo "No changes to commit"
           git push
