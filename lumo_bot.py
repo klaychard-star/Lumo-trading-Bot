@@ -42,7 +42,6 @@ def fetch_yahoo_m5_data():
       )
   }
   try:
-    # 5-second timeout so it never hangs GitHub Actions
     response = requests.get(url, headers=headers, timeout=5)
     response.raise_for_status()
     data = response.json()
@@ -244,13 +243,20 @@ def run_single_check():
     trend_is_bullish = closes[i] > avg50
     trend_is_bearish = closes[i] < avg50
 
-    ref_level = c1_close
+    # Reference level is the 50% midpoint (half) of Candle 1
+    ref_level = (c1_high + c1_low) / 2
     c1_size = c1_high - c1_low
     side = None
     entry_price, tp_price, sl_price = None, None, None
 
-    # Bullish Entry Logic
-    if trend_is_bullish:
+    # Candle color directions
+    c1_is_bearish = c1_close < c1_open
+    c1_is_bullish = c1_close > c1_open
+    c2_is_bullish = c2_close > c2_open
+    c2_is_bearish = c2_close < c2_open
+
+    # Bullish Entry Logic: C1 Bearish, C2 Bullish, C3 Any (taps midpoint)
+    if trend_is_bullish and c1_is_bearish and c2_is_bullish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
       body_above_line = c2_body_min >= ref_level or (
@@ -262,11 +268,14 @@ def run_single_check():
         if tapped_level:
           side = "BUY"
           entry_price = ref_level
-          tp_price = entry_price + c1_size
-          sl_price = c1_open - (c1_size * 0.5)
+          original_sl_base = c1_open - (c1_size * 0.5)
+          sl_price = original_sl_base - 10.0  # 10 pips extra buffer
 
-    # Bearish Entry Logic
-    elif trend_is_bearish:
+          sl_distance = entry_price - sl_price
+          tp_price = entry_price + (sl_distance * 2.5)  # 2.5x risk reward
+
+    # Bearish Entry Logic: C1 Bullish, C2 Bearish, C3 Any (taps midpoint)
+    elif trend_is_bearish and c1_is_bullish and c2_is_bearish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
       body_below_line = c2_body_max <= ref_level or (
@@ -278,8 +287,11 @@ def run_single_check():
         if tapped_level:
           side = "SELL"
           entry_price = ref_level
-          tp_price = entry_price - c1_size
-          sl_price = c1_open + (c1_size * 0.5)
+          original_sl_base = c1_open + (c1_size * 0.5)
+          sl_price = original_sl_base + 10.0  # 10 pips extra buffer
+
+          sl_distance = sl_price - entry_price
+          tp_price = entry_price - (sl_distance * 2.5)  # 2.5x risk reward
 
     if side and entry_price is not None:
       new_trade = {
