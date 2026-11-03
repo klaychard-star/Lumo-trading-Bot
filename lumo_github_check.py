@@ -22,15 +22,14 @@ def log_message(text):
     print(f"[{timestamp}] Error writing to log file: {e}")
 
 def get_lot(balance):
-  # Reverted: Your original step-based lot rule ($0.02 per $100)
   lot = int(balance // 100) * 0.02
   if lot < 0.02: lot = 0.02
   if lot > 2.0: lot = 2.0  # safety cap
   return lot
 
-def fetch_hourly_gold_data():
-  # Reverted: Using GC=F (Gold Futures) with the -26 offset
-  url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=1h"
+def fetch_m5_gold_data():
+  """Fetches M5 (5-minute) Gold Futures data from Yahoo Finance and applies the -26 spot offset."""
+  url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=5m"
   headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   }
@@ -42,22 +41,38 @@ def fetch_hourly_gold_data():
     result = data.get("chart", {}).get("result")
     if not result:
       log_message("Invalid data structure received from Yahoo Finance.")
-      return [], []
+      return [], [], [], [], []
       
     indicators = result[0].get("indicators", {})
-    closes = indicators.get("quote", [{}])[0].get("close", [])
+    quote = indicators.get("quote", [{}])[0]
+    
+    opens = quote.get("open", [])
+    highs = quote.get("high", [])
+    lows = quote.get("low", [])
+    closes = quote.get("close", [])
     timestamps = result[0].get("timestamp", [])
     
-    cleaned = [(ts, c) for ts, c in zip(timestamps, closes) if c is not None]
-    if not cleaned:
-      return [], []
+    # Filter out None values across all arrays synchronously
+    valid_data = [
+        (ts, o, h, l, c) for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes)
+        if o is not None and h is not None and l is not None and c is not None
+    ]
+    
+    if not valid_data:
+      return [], [], [], [], []
       
+    timestamps, opens, highs, lows, closes = zip(*valid_data)
+    
     # Apply static offset for Gold futures to spot estimation (-26)
-    cleaned = [(ts, c - 26) for ts, c in cleaned]
-    return zip(*cleaned)
+    opens = [o - 26 for o in opens]
+    highs = [h - 26 for h in highs]
+    lows = [l - 26 for l in lows]
+    closes = [c - 26 for c in closes]
+    
+    return list(timestamps), list(opens), list(highs), list(lows), list(closes)
   except Exception as e:
-    log_message(f"Error fetching data: {e}")
-    return [], []
+    log_message(f"Error fetching M5 data: {e}")
+    return [], [], [], [], []
 
 def save_json_atomically(filename, data):
   dir_name = os.path.dirname(filename) or "."
@@ -108,20 +123,26 @@ def run_single_check():
     log_message(f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
     return
 
-  timestamps, closes = fetch_hourly_gold_data()
-  timestamps = list(timestamps)
-  closes = list(closes)
+  timestamps, opens, highs, lows, closes = fetch_m5_gold_data()
   
-  if len(closes) < 55:
-    log_message("Not enough candles available.")
+  if len(closes) < 60:
+    log_message("Not enough M5 candles available.")
     return
 
-  i = len(closes) - 1
-  now = closes[i]
-  before = closes[i - 5]
-  avg50 = sum(closes[i - 50 : i]) / 50
-  drop = (now - before) / before * 100
+  # Use index of latest completed candle (-2) to avoid repainting, while -1 is current live candle
+  i = len(closes) - 2
+  current_price = closes[-1]
   
+  # 50-period Moving Average on M5 for Trend Filter
+  avg50 = sum(closes[i-50:i]) / 50
+  trend_is_bullish = closes[i] > avg50
+  trend_is_bearish = closes[i] < avg50
+
+  # Extract the 3 completed candles for the pattern: c1 (impetus), c2 (pullback), c3 (tap/execution)
+  c1_open, c1_high, c1_low, c1_close = opens[i-2], highs[i-2], lows[i-2], closes[i-2]
+  c2_open, c2_high, c2_low, c2_close = opens[i-1], highs[i-1], lows[i-1], closes[i-1]
+  c3_open, c3_high, c3_low, c3_close = opens[i], highs[i], lows[i], closes[i]
+
   # Accurate London Time checking handling DST automatically via zoneinfo
   dt_utc = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
   try:
@@ -142,69 +163,103 @@ def run_single_check():
     balance_data["daily_losses"] = 0
     balance_data["last_loss_date"] = current_date_str
 
-  # Max Daily Loss Circuit Breaker (Stop trading if 2 losses hit today)
+  # Max Daily Loss Circuit Breaker
   if balance_data.get("daily_losses", 0) >= 2:
     log_message("🛑 MAX DAILY LOSS REACHED: 2 losses recorded today. Bot is resting until tomorrow.")
     save_balance(balance_data)
     return
 
   current_lot = get_lot(balance_data["balance"])
-  log_message(f"Check @ ${now:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Chg: {drop:+.2f}% | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}")
+  log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}")
 
   active_trades = load_active_trades()
   updated_active = []
 
+  # Manage active trades using dynamic TP and SL targets set upon entry
   for trade in active_trades:
     trade["candles_held"] += 1
     side = trade["side"]
     entry_price = trade["entry_price"]
     t_lot = trade.get("lot", 0.02)
+    tp_price = trade["tp_price"]
+    sl_price = trade["sl_price"]
     
-    pnl = (now - entry_price) if side == "BUY" else (entry_price - now)
-    tp_hit = pnl >= 6.0
-    sl_hit = pnl <= -2.0
+    pnl = (current_price - entry_price) if side == "BUY" else (entry_price - current_price)
+    
+    tp_hit = (current_price >= tp_price) if side == "BUY" else (current_price <= tp_price)
+    sl_hit = (current_price <= sl_price) if side == "BUY" else (current_price >= sl_price)
     
     if tp_hit or sl_hit:
-      if tp_hit: pnl = 6.0
-      if sl_hit: pnl = -2.0
-      
-      net_pnl = (pnl * (t_lot / BASE_LOT)) - SPREAD_COST
+      if tp_hit:
+        realized_pnl_pips = abs(tp_price - entry_price)
+      else:
+        realized_pnl_pips = -abs(entry_price - sl_price)
+        
+      net_pnl = (realized_pnl_pips * (t_lot / BASE_LOT)) - SPREAD_COST
       balance_data["balance"] += net_pnl
       balance_data["total_trades"] += 1
       
-      if net_pnl > 0:
+      if tp_hit:
         balance_data["wins"] += 1
-        log_message(f"✅ WIN CLOSED #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} -> ${now:.2f} | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(f"✅ WIN CLOSED #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} -> TP hit @ ${current_price:.2f} | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
       else:
         balance_data["losses"] += 1
         balance_data["daily_losses"] = balance_data.get("daily_losses", 0) + 1
-        log_message(f"❌ LOSS CLOSED #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} -> ${now:.2f} | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(f"❌ LOSS CLOSED #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} -> SL hit @ ${current_price:.2f} | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
     else:
       updated_active.append(trade)
-      log_message(f"⏳ HOLDING #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} | PnL: ${pnl:+.2f} | Held: {trade['candles_held']}h")
+      log_message(f"⏳ HOLDING #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} | PnL Pips: ${pnl:+.2f} | Held: {trade['candles_held']} M5s")
 
-  # PROTECTION: Max 1 active trade rule + Cooldown check against recent entries
+  # Strategy Execution: 3-Candle Pullback Pattern
   if is_london and len(updated_active) < 1:
     side = None
-    if now > avg50 and drop < -0.30:
-      side = "BUY"
-    elif now < avg50 and drop > 0.30:
-      side = "SELL"
+    ref_level = c1_close
+    c1_size = c1_high - c1_low
+    
+    # --- BULLISH SETUP ---
+    if trend_is_bullish:
+      c2_body_min = min(c2_open, c2_close)
+      c2_body_max = max(c2_open, c2_close)
+      body_above_line = c2_body_min >= ref_level or (c2_body_min <= ref_level and c2_body_max >= ref_level)
       
+      if body_above_line:
+        tapped_level = c3_low <= ref_level <= c3_high
+        if tapped_level:
+          side = "BUY"
+          entry_price = ref_level
+          tp_price = entry_price + c1_size
+          sl_price = c1_open - (c1_size * 0.5)
+
+    # --- BEARISH SETUP ---
+    elif trend_is_bearish:
+      c2_body_min = min(c2_open, c2_close)
+      c2_body_max = max(c2_open, c2_close)
+      body_below_line = c2_body_max <= ref_level or (c2_body_min <= ref_level and c2_body_max >= ref_level)
+      
+      if body_below_line:
+        tapped_level = c3_low <= ref_level <= c3_high
+        if tapped_level:
+          side = "SELL"
+          entry_price = ref_level
+          tp_price = entry_price - c1_size
+          sl_price = c1_open + (c1_size * 0.5)
+
     if side:
-      recent_entry_exists = any((timestamps[i] - t["entry_timestamp"]) < 18000 for t in active_trades + updated_active)
+      recent_entry_exists = any((timestamps[i] - t["entry_timestamp"]) < 900 for t in active_trades + updated_active)
       
       if not recent_entry_exists:
         new_trade = {
             "id": int(timestamps[i]),
             "side": side,
-            "entry_price": now,
+            "entry_price": entry_price,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
             "entry_timestamp": timestamps[i],
             "candles_held": 0,
             "lot": current_lot
         }
         updated_active.append(new_trade)
-        log_message(f"🚀 NEW SIGNAL: {side} {current_lot:.2f}lot @ ${now:.2f} | Bal ${balance_data['balance']:.2f}")
+        log_message(f"🚀 NEW 3-CANDLE SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f}) | Bal ${balance_data['balance']:.2f}")
 
   save_active_trades(updated_active)
   save_balance(balance_data)
