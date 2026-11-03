@@ -3,7 +3,6 @@ from zoneinfo import ZoneInfo
 import json
 import os
 import tempfile
-import time
 import requests
 
 LOG_FILE = "lumo_live_log.txt"
@@ -29,7 +28,6 @@ def get_lot(balance):
   return lot
 
 def fetch_m5_gold_data():
-  """Fetches M5 (5-minute) Gold Futures data from Yahoo Finance and applies the -26 spot offset."""
   url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=1d&interval=5m"
   headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -53,7 +51,6 @@ def fetch_m5_gold_data():
     closes = quote.get("close", [])
     timestamps = result[0].get("timestamp", [])
     
-    # Filter out None values across all arrays synchronously
     valid_data = [
         (ts, o, h, l, c) for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes)
         if o is not None and h is not None and l is not None and c is not None
@@ -64,7 +61,6 @@ def fetch_m5_gold_data():
       
     timestamps, opens, highs, lows, closes = zip(*valid_data)
     
-    # Apply static offset for Gold futures to spot estimation (-26)
     opens = [o - 26 for o in opens]
     highs = [h - 26 for h in highs]
     lows = [l - 26 for l in lows]
@@ -117,9 +113,24 @@ def save_balance(data):
   save_json_atomically(BALANCE_FILE, data)
 
 def run_single_check():
+  now_utc = datetime.now(timezone.utc)
+  try:
+    dt_london = now_utc.astimezone(ZoneInfo("Europe/London"))
+  except Exception:
+    dt_london = now_utc
+
+  # Check Weekend
+  if now_utc.weekday() >= 5:
+    log_message("🛡️ Weekend detected. Market closed — exiting.")
+    return
+
+  # Check London Session Hours (06:00 to 18:00)
+  if not (6 <= dt_london.hour <= 18):
+    log_message(f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) — exiting.")
+    return
+
   balance_data = load_balance()
   
-  # Safety Guard: Stop trading if balance falls below $20
   if balance_data["balance"] < 20.00:
     log_message(f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
     return
@@ -130,41 +141,24 @@ def run_single_check():
     log_message("Not enough M5 candles available.")
     return
 
-  # Use index of latest completed candle (-2) to avoid repainting, while -1 is current live candle
   i = len(closes) - 2
   current_price = closes[-1]
   
-  # 50-period Moving Average on M5 for Trend Filter
   avg50 = sum(closes[i-50:i]) / 50
   trend_is_bullish = closes[i] > avg50
   trend_is_bearish = closes[i] < avg50
 
-  # Extract the 3 completed candles for the pattern: c1 (impetus), c2 (pullback), c3 (tap/execution)
   c1_open, c1_high, c1_low, c1_close = opens[i-2], highs[i-2], lows[i-2], closes[i-2]
   c2_open, c2_high, c2_low, c2_close = opens[i-1], highs[i-1], lows[i-1], closes[i-1]
   c3_open, c3_high, c3_low, c3_close = opens[i], highs[i], lows[i], closes[i]
 
-  # Accurate London Time checking handling DST automatically via zoneinfo
-  dt_utc = datetime.now(timezone.utc)
-  try:
-    dt_london = dt_utc.astimezone(ZoneInfo("Europe/London"))
-  except Exception:
-    dt_london = dt_utc
-  is_london = 6 <= dt_london.hour <= 18
+  dt_utc = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
 
-  # Weekend Protection (Block trading on Saturday and Sunday)
-  is_weekend = dt_utc.weekday() >= 5
-  if is_weekend:
-    log_message("🛡️ Weekend detected. Market closed — skipping check.")
-    return
-
-  # Reset daily loss counter if it's a new day
   current_date_str = dt_utc.strftime("%Y-%m-%d")
   if balance_data.get("last_loss_date") != current_date_str:
     balance_data["daily_losses"] = 0
     balance_data["last_loss_date"] = current_date_str
 
-  # Max Daily Loss Circuit Breaker
   if balance_data.get("daily_losses", 0) >= 2:
     log_message("🛑 MAX DAILY LOSS REACHED: 2 losses recorded today. Bot is resting until tomorrow.")
     save_balance(balance_data)
@@ -176,7 +170,6 @@ def run_single_check():
   active_trades = load_active_trades()
   updated_active = []
 
-  # Manage active trades using dynamic TP and SL targets set upon entry
   for trade in active_trades:
     trade["candles_held"] += 1
     side = trade["side"]
@@ -211,13 +204,11 @@ def run_single_check():
       updated_active.append(trade)
       log_message(f"⏳ HOLDING #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} | PnL Pips: ${pnl:+.2f} | Held: {trade['candles_held']} M5s")
 
-  # Strategy Execution: 3-Candle Pullback Pattern (Only during London hours)
-  if is_london and len(updated_active) < 1:
+  if len(updated_active) < 1:
     side = None
     ref_level = c1_close
     c1_size = c1_high - c1_low
     
-    # --- BULLISH SETUP ---
     if trend_is_bullish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
@@ -231,7 +222,6 @@ def run_single_check():
           tp_price = entry_price + c1_size
           sl_price = c1_open - (c1_size * 0.5)
 
-    # --- BEARISH SETUP ---
     elif trend_is_bearish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
@@ -266,32 +256,4 @@ def run_single_check():
   save_balance(balance_data)
 
 if __name__ == "__main__":
-  log_message("🤖 Lumo Trading Bot started with clock-aligned sync mode...")
-  while True:
-    try:
-      now_utc = datetime.now(timezone.utc)
-      try:
-        now_london = now_utc.astimezone(ZoneInfo("Europe/London"))
-      except Exception:
-        now_london = now_utc
-
-      is_weekend = now_utc.weekday() >= 5
-      is_london_hours = 6 <= now_london.hour <= 18
-
-      if is_weekend:
-        log_message("🛡️ Weekend detected. Bot is sleeping for 1 hour...")
-        time.sleep(3600)
-      elif not is_london_hours:
-        log_message(f"💤 Outside London hours ({now_london.strftime('%H:%M')} London). Sleeping for 30 minutes...")
-        time.sleep(1800)
-      else:
-        # Active London Session: Run check, then calculate exact seconds until the next 5-minute mark
-        run_single_check()
-        
-        # Calculate exact time left in the current 5-minute block to prevent drift
-        sleep_duration = 300 - (time.time() % 300)
-        time.sleep(max(1, sleep_duration))
-
-    except Exception as e:
-      log_message(f"⚠️ Error in execution loop: {e}")
-      time.sleep(60)
+  run_single_check()
