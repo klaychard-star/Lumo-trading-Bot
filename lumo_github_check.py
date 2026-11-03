@@ -266,7 +266,7 @@ def run_single_check():
   save_balance(balance_data)
 
 if __name__ == "__main__":
-  log_message("🤖 Lumo Trading Bot started in smart session-aware loop mode...")
+  log_message("🤖 Lumo Trading Bot started with clock-aligned sync mode...")
   while True:
     try:
       now_utc = datetime.now(timezone.utc)
@@ -280,14 +280,17 @@ if __name__ == "__main__":
 
       if is_weekend:
         log_message("🛡️ Weekend detected. Bot is sleeping for 1 hour...")
-        time.sleep(3600)  # Sleep for 1 hour on weekends
+        time.sleep(3600)
       elif not is_london_hours:
         log_message(f"💤 Outside London hours ({now_london.strftime('%H:%M')} London). Sleeping for 30 minutes...")
-        time.sleep(1800)  # Sleep for 30 minutes outside London session
+        time.sleep(1800)
       else:
-        # Active London Session: Run check and wait 5 minutes
+        # Active London Session: Run check, then calculate exact seconds until the next 5-minute mark
         run_single_check()
-        time.sleep(300)
+        
+        # Calculate exact time left in the current 5-minute block to prevent drift
+        sleep_duration = 300 - (time.time() % 300)
+        time.sleep(max(1, sleep_duration))
 
     except Exception as e:
       log_message(f"⚠️ Error in execution loop: {e}")
