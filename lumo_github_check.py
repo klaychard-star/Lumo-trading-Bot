@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 import json
 import os
 import tempfile
+import time
 import requests
 
 LOG_FILE = "lumo_live_log.txt"
@@ -144,7 +145,7 @@ def run_single_check():
   c3_open, c3_high, c3_low, c3_close = opens[i], highs[i], lows[i], closes[i]
 
   # Accurate London Time checking handling DST automatically via zoneinfo
-  dt_utc = datetime.fromtimestamp(timestamps[i], tz=timezone.utc)
+  dt_utc = datetime.now(timezone.utc)
   try:
     dt_london = dt_utc.astimezone(ZoneInfo("Europe/London"))
   except Exception:
@@ -154,7 +155,7 @@ def run_single_check():
   # Weekend Protection (Block trading on Saturday and Sunday)
   is_weekend = dt_utc.weekday() >= 5
   if is_weekend:
-    log_message("🛡️ Weekend detected. Market closed or stale data — skipping check.")
+    log_message("🛡️ Weekend detected. Market closed — skipping check.")
     return
 
   # Reset daily loss counter if it's a new day
@@ -210,7 +211,7 @@ def run_single_check():
       updated_active.append(trade)
       log_message(f"⏳ HOLDING #{trade['id']}: {side} {t_lot:.2f}lot @ ${entry_price:.2f} | PnL Pips: ${pnl:+.2f} | Held: {trade['candles_held']} M5s")
 
-  # Strategy Execution: 3-Candle Pullback Pattern
+  # Strategy Execution: 3-Candle Pullback Pattern (Only during London hours)
   if is_london and len(updated_active) < 1:
     side = None
     ref_level = c1_close
@@ -265,4 +266,29 @@ def run_single_check():
   save_balance(balance_data)
 
 if __name__ == "__main__":
-  run_single_check()
+  log_message("🤖 Lumo Trading Bot started in smart session-aware loop mode...")
+  while True:
+    try:
+      now_utc = datetime.now(timezone.utc)
+      try:
+        now_london = now_utc.astimezone(ZoneInfo("Europe/London"))
+      except Exception:
+        now_london = now_utc
+
+      is_weekend = now_utc.weekday() >= 5
+      is_london_hours = 6 <= now_london.hour <= 18
+
+      if is_weekend:
+        log_message("🛡️ Weekend detected. Bot is sleeping for 1 hour...")
+        time.sleep(3600)  # Sleep for 1 hour on weekends
+      elif not is_london_hours:
+        log_message(f"💤 Outside London hours ({now_london.strftime('%H:%M')} London). Sleeping for 30 minutes...")
+        time.sleep(1800)  # Sleep for 30 minutes outside London session
+      else:
+        # Active London Session: Run check and wait 5 minutes
+        run_single_check()
+        time.sleep(300)
+
+    except Exception as e:
+      log_message(f"⚠️ Error in execution loop: {e}")
+      time.sleep(60)
