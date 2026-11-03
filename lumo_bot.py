@@ -11,6 +11,8 @@ BALANCE_FILE = "lumo_balance.json"
 SPREAD_COST = 0.60
 BASE_LOT = 0.01  # $1 per $1 movement baseline
 INITIAL_BALANCE = 100.00
+SL_BUFFER = 1.0  # Tight 1-point SL risk model
+TP_MULTIPLIER = 2.5  # 2.5x Reward multiplier
 
 
 def log_message(text):
@@ -243,9 +245,8 @@ def run_single_check():
     trend_is_bullish = closes[i] > avg50
     trend_is_bearish = closes[i] < avg50
 
-    # Reference level is the 50% midpoint (half) of Candle 1
+    # Reference level is the 50% midpoint of Candle 1
     ref_level = (c1_high + c1_low) / 2
-    c1_size = c1_high - c1_low
     side = None
     entry_price, tp_price, sl_price = None, None, None
 
@@ -255,7 +256,7 @@ def run_single_check():
     c2_is_bullish = c2_close > c2_open
     c2_is_bearish = c2_close < c2_open
 
-    # Bullish Entry Logic: C1 Bearish, C2 Bullish, C3 Any (taps midpoint)
+    # Bullish Entry Logic: C1 Bearish, C2 Bullish, C3 Taps Midpoint
     if trend_is_bullish and c1_is_bearish and c2_is_bullish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
@@ -268,13 +269,10 @@ def run_single_check():
         if tapped_level:
           side = "BUY"
           entry_price = ref_level
-          original_sl_base = c1_open - (c1_size * 0.5)
-          sl_price = original_sl_base - 10.0  # 10 pips extra buffer
+          sl_price = entry_price - SL_BUFFER
+          tp_price = entry_price + (SL_BUFFER * TP_MULTIPLIER)
 
-          sl_distance = entry_price - sl_price
-          tp_price = entry_price + (sl_distance * 2.5)  # 2.5x risk reward
-
-    # Bearish Entry Logic: C1 Bullish, C2 Bearish, C3 Any (taps midpoint)
+    # Bearish Entry Logic: C1 Bullish, C2 Bearish, C3 Taps Midpoint
     elif trend_is_bearish and c1_is_bullish and c2_is_bearish:
       c2_body_min = min(c2_open, c2_close)
       c2_body_max = max(c2_open, c2_close)
@@ -287,11 +285,8 @@ def run_single_check():
         if tapped_level:
           side = "SELL"
           entry_price = ref_level
-          original_sl_base = c1_open + (c1_size * 0.5)
-          sl_price = original_sl_base + 10.0  # 10 pips extra buffer
-
-          sl_distance = sl_price - entry_price
-          tp_price = entry_price - (sl_distance * 2.5)  # 2.5x risk reward
+          sl_price = entry_price + SL_BUFFER
+          tp_price = entry_price - (SL_BUFFER * TP_MULTIPLIER)
 
     if side and entry_price is not None:
       new_trade = {
