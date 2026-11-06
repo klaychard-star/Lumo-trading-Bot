@@ -21,7 +21,7 @@ jobs:
         run: pip install requests
 
       - name: Run LUMO Bot
-        run: python lumo.py
+      - run: python lumo_bot.py
 
       - name: Commit state updates
         run: |
