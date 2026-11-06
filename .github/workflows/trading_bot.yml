@@ -1,10 +1,9 @@
-name: LUMO Live Bot
-
 on:
+  workflow_dispatch:   # <-- THIS gives you Run button!
   repository_dispatch:
     types: [run_lumo_bot]
   schedule:
-    - cron: '*/5 * * * *' # Keeps the native cron running as a backup
+    - cron: '*/5 * * * *'
 
 jobs:
   run-bot:
