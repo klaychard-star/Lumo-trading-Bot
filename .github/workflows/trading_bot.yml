@@ -1,5 +1,6 @@
+name: LUMO Live Bot
 on:
-  workflow_dispatch:   # <-- THIS gives you Run button!
+  workflow_dispatch:
   repository_dispatch:
     types: [run_lumo_bot]
   schedule:
@@ -21,12 +22,12 @@ jobs:
         run: pip install requests
 
       - name: Run LUMO Bot
-      - run: python lumo_bot.py
+        run: python lumo_bot.py
 
       - name: Commit state updates
         run: |
           git config --global user.name "LUMO Bot"
-          git config --global user.email "bot@users.noreply.github.com"
-          git add lumo_active_trades.json lumo_balance.json lumo_live_log.txt
-          git commit -m "Auto-update bot state [skip ci]" || echo "No changes to commit"
-          git push
+          git config --global user.email "bot@lumo.com"
+          git add lumo_active_trades.json lumo_balance.json || true
+          git commit -m "Auto-update bot state" || true
+          git push || true
