@@ -9,11 +9,12 @@ LOG_FILE = "lumo_live_log.txt"
 STATE_FILE = "lumo_active_trades.json"
 BALANCE_FILE = "lumo_balance.json"
 SPREAD_COST = 0.60
-BASE_LOT = 0.01  # $1 per $1 movement baseline
+BASE_LOT = 0.01
 INITIAL_BALANCE = 100.00
-SL_BUFFER = 1.0  # Tight 1-point SL risk model
-TP_MULTIPLIER = 2.5  # 2.5x Reward multiplier
-
+SL_PIPS = 5
+PIP_VALUE = 0.10
+SL_OFFSET = SL_PIPS * PIP_VALUE  # 5 pips = $0.50
+TP_MULTIPLIER = 2.5
 
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -25,65 +26,44 @@ def log_message(text):
   except Exception as e:
     print(f"[{timestamp}] Error writing to log file: {e}")
 
-
 def get_lot(balance):
   lot = int(balance // 100) * 0.02
   if lot < 0.02:
     lot = 0.02
   if lot > 2.0:
-    lot = 2.0  # Maximum safety cap set to 2.0 lots
+    lot = 2.0
   return lot
-
 
 def fetch_yahoo_m5_data():
   url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m"
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      )
-  }
+  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
   try:
     response = requests.get(url, headers=headers, timeout=5)
     response.raise_for_status()
     data = response.json()
-
     result = data.get("chart", {}).get("result")
     if not result:
       log_message("Invalid data structure received from Yahoo Finance.")
       return [], [], [], [], []
-
     indicators = result[0].get("indicators", {})
     quote = indicators.get("quote", [{}])[0]
-
     opens = quote.get("open", [])
     highs = quote.get("high", [])
     lows = quote.get("low", [])
     closes = quote.get("close", [])
     timestamps = result[0].get("timestamp", [])
-
-    valid_data = [
-        (ts, o, h, l, c)
-        for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes)
-        if o is not None and h is not None and l is not None and c is not None
-    ]
-
+    valid_data = [(ts, o, h, l, c) for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes) if o is not None and h is not None and l is not None and c is not None]
     if not valid_data:
       return [], [], [], [], []
-
     ts_list, o_list, h_list, l_list, c_list = zip(*valid_data)
-
-    # Apply -26 spot offset for Gold futures estimation
     o_list = [x - 26 for x in o_list]
     h_list = [x - 26 for x in h_list]
     l_list = [x - 26 for x in l_list]
     c_list = [x - 26 for x in c_list]
-
     return list(ts_list), list(o_list), list(h_list), list(l_list), list(c_list)
   except Exception as e:
     log_message(f"Error fetching data: {e}")
     return [], [], [], [], []
-
 
 def save_json_atomically(filename, data):
   dir_name = os.path.dirname(filename) or "."
@@ -95,7 +75,6 @@ def save_json_atomically(filename, data):
   except Exception as e:
     log_message(f"Error saving {filename} atomically: {e}")
 
-
 def load_active_trades():
   if os.path.exists(STATE_FILE):
     try:
@@ -105,10 +84,8 @@ def load_active_trades():
       log_message(f"Error reading active trades state: {e}")
   return []
 
-
 def save_active_trades(trades):
   save_json_atomically(STATE_FILE, trades)
-
 
 def load_balance():
   if os.path.exists(BALANCE_FILE):
@@ -117,17 +94,10 @@ def load_balance():
         return json.load(f)
     except Exception as e:
       log_message(f"Error reading balance file: {e}")
-  return {
-      "balance": INITIAL_BALANCE,
-      "wins": 0,
-      "losses": 0,
-      "total_trades": 0,
-  }
-
+  return {"balance": INITIAL_BALANCE, "wins": 0, "losses": 0, "total_trades": 0}
 
 def save_balance(data):
   save_json_atomically(BALANCE_FILE, data)
-
 
 def run_single_check():
   now_utc = datetime.now(timezone.utc)
@@ -135,83 +105,40 @@ def run_single_check():
     dt_london = now_utc.astimezone(ZoneInfo("Europe/London"))
   except Exception:
     dt_london = now_utc
-
-  # Weekend protection (Monday = 0, Sunday = 6)
   if now_utc.weekday() >= 5:
     log_message("🛡️ Weekend detected. Market closed — exiting.")
     return
-
-  # London Session Hours (06:00 to 18:00 UTC)
   if not (6 <= dt_london.hour <= 18):
-    log_message(
-        f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) —"
-        " exiting."
-    )
+    log_message(f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) — exiting.")
     return
-
   balance_data = load_balance()
-
   if balance_data["balance"] < 20.00:
-    log_message(
-        f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below"
-        " $20.00 safety threshold. Trading halted."
-    )
+    log_message(f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
     return
-
   timestamps, opens, highs, lows, closes = fetch_yahoo_m5_data()
-
   if len(closes) < 100:
     log_message("❌ Error: Not enough data fetched to evaluate strategy.")
     return
-
   i = len(closes) - 2
   current_high = highs[i]
   current_low = lows[i]
   current_price = closes[i]
-
-  # 50-period Moving Average trend baseline
   avg50 = sum(closes[i - 50 : i]) / 50
-
-  c1_open, c1_high, c1_low, c1_close = (
-      opens[i - 2],
-      highs[i - 2],
-      lows[i - 2],
-      closes[i - 2],
-  )
-  c2_open, c2_high, c2_low, c2_close = (
-      opens[i - 1],
-      highs[i - 1],
-      lows[i - 1],
-      closes[i - 1],
-  )
-  c3_open, c3_high, c3_low, c3_close = (
-      opens[i],
-      highs[i],
-      lows[i],
-      closes[i],
-  )
-
+  c1_open, c1_high, c1_low, c1_close = opens[i - 2], highs[i - 2], lows[i - 2], closes[i - 2]
+  c2_open, c2_high, c2_low, c2_close = opens[i - 1], highs[i - 1], lows[i - 1], closes[i - 1]
+  c3_open, c3_high, c3_low, c3_close = opens[i], highs[i], lows[i], closes[i]
   current_lot = get_lot(balance_data["balance"])
-  log_message(
-      f"M5 Check @ ${current_price:.2f} | London Time:"
-      f" {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot:"
-      f" {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}"
-  )
-
+  log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}")
   active_trades = load_active_trades()
   updated_active = []
-
-  # --- 1. MANAGE ACTIVE POSITIONS ---
   for trade in active_trades:
     side = trade["side"]
     entry = trade["entry"]
     tp = trade["tp"]
     sl = trade["sl"]
     lot = trade["lot"]
-
     tp_hit = current_high >= tp if side == "BUY" else current_low <= tp
     sl_hit = current_low <= sl if side == "BUY" else current_high >= sl
-
     if tp_hit or sl_hit:
       if sl_hit and not tp_hit:
         realized_pips = -abs(entry - sl)
@@ -219,92 +146,52 @@ def run_single_check():
       else:
         realized_pips = abs(tp - entry)
         is_win = True
-
       net_pnl = (realized_pips * (lot / BASE_LOT)) - SPREAD_COST
       balance_data["balance"] += net_pnl
       balance_data["total_trades"] += 1
-
       if is_win:
         balance_data["wins"] += 1
-        log_message(
-            f"✅ WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net:"
-            f" ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}"
-        )
+        log_message(f"✅ WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
       else:
         balance_data["losses"] = balance_data.get("losses", 0) + 1
-        log_message(
-            f"❌ LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net:"
-            f" ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}"
-        )
+        log_message(f"❌ LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
     else:
       updated_active.append(trade)
       log_message(f"⏳ HOLDING active trade: {side} @ ${entry:.2f}")
-
-  # --- 2. IDENTIFY NEW 3-CANDLE SETUPS ---
   if not updated_active:
     trend_is_bullish = closes[i] > avg50
     trend_is_bearish = closes[i] < avg50
-
-    # Reference level is the 50% midpoint of Candle 1
     ref_level = (c1_high + c1_low) / 2
     side = None
     entry_price, tp_price, sl_price = None, None, None
-
-    # Candle color directions
     c1_is_bearish = c1_close < c1_open
     c1_is_bullish = c1_close > c1_open
     c2_is_bullish = c2_close > c2_open
     c2_is_bearish = c2_close < c2_open
-
-    # Bullish Entry Logic: C1 Bearish, C2 Bullish, C3 Taps Midpoint
-    if trend_is_bullish and c1_is_bearish and c2_is_bullish:
-      c2_body_min = min(c2_open, c2_close)
-      c2_body_max = max(c2_open, c2_close)
-      body_above_line = c2_body_min >= ref_level or (
-          c2_body_min <= ref_level and c2_body_max >= ref_level
-      )
-
-      if body_above_line:
-        tapped_level = c3_low <= ref_level <= c3_high
-        if tapped_level:
-          side = "BUY"
-          entry_price = ref_level
-          sl_price = entry_price - SL_BUFFER
-          tp_price = entry_price + (SL_BUFFER * TP_MULTIPLIER)
-
-    # Bearish Entry Logic: C1 Bullish, C2 Bearish, C3 Taps Midpoint
-    elif trend_is_bearish and c1_is_bullish and c2_is_bearish:
-      c2_body_min = min(c2_open, c2_close)
-      c2_body_max = max(c2_open, c2_close)
-      body_below_line = c2_body_max <= ref_level or (
-          c2_body_min <= ref_level and c2_body_max >= ref_level
-      )
-
-      if body_below_line:
-        tapped_level = c3_low <= ref_level <= c3_high
-        if tapped_level:
-          side = "SELL"
-          entry_price = ref_level
-          sl_price = entry_price + SL_BUFFER
-          tp_price = entry_price - (SL_BUFFER * TP_MULTIPLIER)
-
+    # === BUY: C1 Red, C2 Green BODY CLOSE above C1 Close (NOT wick), C3 taps Half of C1 ===
+    if trend_is_bullish and c1_is_bearish and c2_is_bullish and c2_close > c1_close:
+      tapped_level = c3_low <= ref_level <= c3_high
+      if tapped_level:
+        side = "BUY"
+        entry_price = ref_level  # Half of C1
+        sl_price = c1_close + SL_OFFSET  # C1 Close + 5 pips = + $0.50
+        risk = entry_price - sl_price  # What is being risked
+        tp_price = entry_price + (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
+    # === SELL: C1 Green, C2 Red BODY CLOSE below C1 Close (NOT wick), C3 taps Half of C1 ===
+    elif trend_is_bearish and c1_is_bullish and c2_is_bearish and c2_close < c1_close:
+      tapped_level = c3_low <= ref_level <= c3_high
+      if tapped_level:
+        side = "SELL"
+        entry_price = ref_level  # Half of C1
+        sl_price = c1_close + SL_OFFSET  # C1 Close + 5 pips = + $0.50 - ALSO ADD
+        risk = sl_price - entry_price  # What is being risked
+        tp_price = entry_price - (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     if side and entry_price is not None:
-      new_trade = {
-          "side": side,
-          "entry": entry_price,
-          "tp": tp_price,
-          "sl": sl_price,
-          "lot": current_lot,
-      }
+      new_trade = {"side": side, "entry": entry_price, "tp": tp_price, "sl": sl_price, "lot": current_lot}
       updated_active.append(new_trade)
-      log_message(
-          f"🚀 NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f}"
-          f" (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})"
-      )
-
+      log_message(f"🚀 NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
   save_active_trades(updated_active)
   save_balance(balance_data)
-
 
 if __name__ == "__main__":
   run_single_check()
