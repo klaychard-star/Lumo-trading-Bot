@@ -1,7 +1,8 @@
 """
-LUMO_BOT - LIVE - Gold M5 - FIXED
+LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK
   OPEN trades close ANYTIME (even night/weekend)
   NEW trades ONLY 06:00-18:00 London, weekdays
+  NEW RULE: If Risk > $3.00 per 0.01 lot -> SKIP TRADE (C1 too big!)
   BUY:  C1 Red, C2 Green BODY CLOSE > C1 Close, C3 taps Half
   SELL: C1 Green, C2 Red BODY CLOSE < C1 Close, C3 taps Half
   Entry   = Half of C1 (High + Low) / 2
@@ -27,6 +28,7 @@ SL_PIPS = 5
 PIP_VALUE = 0.10
 SL_OFFSET = SL_PIPS * PIP_VALUE  # 5 pips = $0.50
 TP_MULTIPLIER = 2.5
+MAX_RISK = 3.00  # <-- NEW! Max $3.00 risk per 0.01 lot
 
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -186,6 +188,7 @@ def run_single_check():
     ref_level = (c1_high + c1_low) / 2
     side = None
     entry_price, tp_price, sl_price = None, None, None
+    risk = None
     c1_is_bearish = c1_close < c1_open
     c1_is_bullish = c1_close > c1_open
     c2_is_bullish = c2_close > c2_open
@@ -209,9 +212,13 @@ def run_single_check():
         risk = sl_price - entry_price
         tp_price = entry_price - (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     if side and entry_price is not None:
-      new_trade = {"side": side, "entry": entry_price, "tp": tp_price, "sl": sl_price, "lot": current_lot}
-      updated_active.append(new_trade)
-      log_message(f"NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
+      # === NEW: $3.00 MAX RISK RULE - SKIP IF C1 TOO BIG! ===
+      if risk is not None and risk > MAX_RISK:
+        log_message(f"SKIP {side}: Risk ${risk:.2f} > ${MAX_RISK:.2f} max per 0.01 lot - C1 too big! Entry ${entry_price:.2f} SL ${sl_price:.2f}")
+      else:
+        new_trade = {"side": side, "entry": entry_price, "tp": tp_price, "sl": sl_price, "lot": current_lot}
+        updated_active.append(new_trade)
+        log_message(f"NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f} | Risk: ${risk:.2f})")
   elif not updated_active and not can_take_new_trade:
     log_message("Skipping NEW setup - Outside London hours / Weekend.")
 
