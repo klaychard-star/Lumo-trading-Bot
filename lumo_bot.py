@@ -1,5 +1,7 @@
 """
-LUMO_BOT - LIVE - Gold M5
+LUMO_BOT - LIVE - Gold M5 - FIXED
+  OPEN trades close ANYTIME (even night/weekend)
+  NEW trades ONLY 06:00-18:00 London, weekdays
   BUY:  C1 Red, C2 Green BODY CLOSE > C1 Close, C3 taps Half
   SELL: C1 Green, C2 Red BODY CLOSE < C1 Close, C3 taps Half
   Entry   = Half of C1 (High + Low) / 2
@@ -115,12 +117,18 @@ def run_single_check():
     dt_london = now_utc.astimezone(ZoneInfo("Europe/London"))
   except Exception:
     dt_london = now_utc
-  if now_utc.weekday() >= 5:
-    log_message("Weekend detected. Market closed - exiting.")
-    return
-  if not (6 <= dt_london.hour <= 18):
-    log_message(f"Outside London hours ({dt_london.strftime('%H:%M')} London) - exiting.")
-    return
+
+  # === FIXED: DO NOT EXIT HERE ANYMORE! ===
+  # We need to still manage OPEN trades even outside London hours!
+  is_weekend = now_utc.weekday() >= 5
+  is_london_hours = (6 <= dt_london.hour <= 18)
+  can_take_new_trade = (not is_weekend) and is_london_hours
+
+  if is_weekend:
+    log_message("Weekend detected - No NEW trades, but still managing OPEN trades.")
+  elif not is_london_hours:
+    log_message(f"Outside London hours ({dt_london.strftime('%H:%M')} London) - No NEW trades, but still managing OPEN trades.")
+
   balance_data = load_balance()
   if balance_data["balance"] < 20.00:
     log_message(f"CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
@@ -138,7 +146,9 @@ def run_single_check():
   c2_open, c2_high, c2_low, c2_close = opens[i - 1], highs[i - 1], lows[i - 1], closes[i - 1]
   c3_open, c3_high, c3_low, c3_close = opens[i], highs[i], lows[i], closes[i]
   current_lot = get_lot(balance_data["balance"])
-  log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f}")
+  log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f} | New Trades Allowed: {can_take_new_trade}")
+
+  # === 1. MANAGE OPEN TRADES - ALWAYS RUNS, EVEN AT NIGHT! ===
   active_trades = load_active_trades()
   updated_active = []
   for trade in active_trades:
@@ -168,7 +178,9 @@ def run_single_check():
     else:
       updated_active.append(trade)
       log_message(f"HOLDING active trade: {side} @ ${entry:.2f}")
-  if not updated_active:
+
+  # === 2. NEW TRADES - ONLY IF LONDON HOURS + WEEKDAY! ===
+  if not updated_active and can_take_new_trade:
     trend_is_bullish = closes[i] > avg50
     trend_is_bearish = closes[i] < avg50
     ref_level = (c1_high + c1_low) / 2
@@ -184,7 +196,7 @@ def run_single_check():
       if tapped_level:
         side = "BUY"
         entry_price = ref_level  # Half of C1
-        sl_price = c1_low - SL_OFFSET  # FIXED: C1 Low - $0.50 - OUTSIDE C1 BELOW
+        sl_price = c1_low - SL_OFFSET  # C1 Low - $0.50 - OUTSIDE C1 BELOW
         risk = entry_price - sl_price
         tp_price = entry_price + (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     # === SELL: C1 Green, C2 Red BODY CLOSE below C1 Close (NOT wick), C3 taps Half of C1 ===
@@ -193,13 +205,16 @@ def run_single_check():
       if tapped_level:
         side = "SELL"
         entry_price = ref_level  # Half of C1
-        sl_price = c1_high + SL_OFFSET  # FIXED: C1 High + $0.50 - OUTSIDE C1 ABOVE
+        sl_price = c1_high + SL_OFFSET  # C1 High + $0.50 - OUTSIDE C1 ABOVE
         risk = sl_price - entry_price
         tp_price = entry_price - (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     if side and entry_price is not None:
       new_trade = {"side": side, "entry": entry_price, "tp": tp_price, "sl": sl_price, "lot": current_lot}
       updated_active.append(new_trade)
       log_message(f"NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
+  elif not updated_active and not can_take_new_trade:
+    log_message("Skipping NEW setup - Outside London hours / Weekend.")
+
   save_active_trades(updated_active)
   save_balance(balance_data)
 
