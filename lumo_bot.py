@@ -1,3 +1,13 @@
+"""
+LUMO_BOT - LIVE - Gold M5
+  BUY:  C1 Red, C2 Green BODY CLOSE > C1 Close, C3 taps Half
+  SELL: C1 Green, C2 Red BODY CLOSE < C1 Close, C3 taps Half
+  Entry   = Half of C1 (High + Low) / 2
+  BUY SL  = C1 Low - $0.50  (OUTSIDE C1 - BELOW)
+  SELL SL = C1 High + $0.50 (OUTSIDE C1 - ABOVE)
+  TP      = 2.5 x Risk
+"""
+
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import json
@@ -106,18 +116,18 @@ def run_single_check():
   except Exception:
     dt_london = now_utc
   if now_utc.weekday() >= 5:
-    log_message("🛡️ Weekend detected. Market closed — exiting.")
+    log_message("Weekend detected. Market closed - exiting.")
     return
   if not (6 <= dt_london.hour <= 18):
-    log_message(f"💤 Outside London hours ({dt_london.strftime('%H:%M')} London) — exiting.")
+    log_message(f"Outside London hours ({dt_london.strftime('%H:%M')} London) - exiting.")
     return
   balance_data = load_balance()
   if balance_data["balance"] < 20.00:
-    log_message(f"🚨 CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
+    log_message(f"CRITICAL: Balance (${balance_data['balance']:.2f}) is below $20.00 safety threshold. Trading halted.")
     return
   timestamps, opens, highs, lows, closes = fetch_yahoo_m5_data()
   if len(closes) < 100:
-    log_message("❌ Error: Not enough data fetched to evaluate strategy.")
+    log_message("Error: Not enough data fetched to evaluate strategy.")
     return
   i = len(closes) - 2
   current_high = highs[i]
@@ -151,13 +161,13 @@ def run_single_check():
       balance_data["total_trades"] += 1
       if is_win:
         balance_data["wins"] += 1
-        log_message(f"✅ WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(f"WIN CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> TP hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
       else:
         balance_data["losses"] = balance_data.get("losses", 0) + 1
-        log_message(f"❌ LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
+        log_message(f"LOSS CLOSED: {side} {lot:.2f}lot @ ${entry:.2f} -> SL hit | Net: ${net_pnl:+.2f} | Bal: ${balance_data['balance']:.2f}")
     else:
       updated_active.append(trade)
-      log_message(f"⏳ HOLDING active trade: {side} @ ${entry:.2f}")
+      log_message(f"HOLDING active trade: {side} @ ${entry:.2f}")
   if not updated_active:
     trend_is_bullish = closes[i] > avg50
     trend_is_bearish = closes[i] < avg50
@@ -174,8 +184,8 @@ def run_single_check():
       if tapped_level:
         side = "BUY"
         entry_price = ref_level  # Half of C1
-        sl_price = c1_close + SL_OFFSET  # C1 Close + 5 pips = + $0.50
-        risk = entry_price - sl_price  # What is being risked
+        sl_price = c1_low - SL_OFFSET  # FIXED: C1 Low - $0.50 - OUTSIDE C1 BELOW
+        risk = entry_price - sl_price
         tp_price = entry_price + (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     # === SELL: C1 Green, C2 Red BODY CLOSE below C1 Close (NOT wick), C3 taps Half of C1 ===
     elif trend_is_bearish and c1_is_bullish and c2_is_bearish and c2_close < c1_close:
@@ -183,13 +193,13 @@ def run_single_check():
       if tapped_level:
         side = "SELL"
         entry_price = ref_level  # Half of C1
-        sl_price = c1_close + SL_OFFSET  # C1 Close + 5 pips = + $0.50 - ALSO ADD
-        risk = sl_price - entry_price  # What is being risked
+        sl_price = c1_high + SL_OFFSET  # FIXED: C1 High + $0.50 - OUTSIDE C1 ABOVE
+        risk = sl_price - entry_price
         tp_price = entry_price - (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     if side and entry_price is not None:
       new_trade = {"side": side, "entry": entry_price, "tp": tp_price, "sl": sl_price, "lot": current_lot}
       updated_active.append(new_trade)
-      log_message(f"🚀 NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
+      log_message(f"NEW SETUP: {side} {current_lot:.2f}lot @ Entry ${entry_price:.2f} (TP: ${tp_price:.2f} | SL: ${sl_price:.2f})")
   save_active_trades(updated_active)
   save_balance(balance_data)
 
