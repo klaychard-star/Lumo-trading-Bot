@@ -70,10 +70,10 @@ def fetch_yahoo_m5_data():
     if not valid_data:
       return [], [], [], [], []
     ts_list, o_list, h_list, l_list, c_list = zip(*valid_data)
-    o_list = [x - 26 for x in o_list]
-    h_list = [x - 26 for x in h_list]
-    l_list = [x - 26 for x in l_list]
-    c_list = [x - 26 for x in c_list]
+    o_list = [x - 12.43 for x in o_list]
+    h_list = [x - 12.43 for x in h_list]
+    l_list = [x - 12.43 for x in l_list]
+    c_list = [x - 12.43 for x in c_list]
     return list(ts_list), list(o_list), list(h_list), list(l_list), list(c_list)
   except Exception as e:
     log_message(f"Error fetching data: {e}")
