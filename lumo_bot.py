@@ -9,8 +9,8 @@ LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK + AUTO-SYNC
   BUY SL  = C1 Low - $0.50  (OUTSIDE C1 - BELOW)
   SELL SL = C1 High + $0.50 (OUTSIDE C1 - ABOVE)
   TP      = 2.5 x Risk
-  PRICE FIX: Auto-Offset - Yahoo candles shifted to LIVE price every run!
-  NO MORE -12.43 / -26 MANUAL FIX!
+  PRICE FIX: NOW USES DERIV API DIRECT - NO Yahoo, NO delay, NO offset!
+  Token from GitHub Secrets -> DERIV_TOKEN
 """
 
 from datetime import datetime, timezone
@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import requests
+import websocket
 
 LOG_FILE = "lumo_live_log.txt"
 STATE_FILE = "lumo_active_trades.json"
@@ -31,6 +32,12 @@ PIP_VALUE = 0.10
 SL_OFFSET = SL_PIPS * PIP_VALUE  # 5 pips = $0.50
 TP_MULTIPLIER = 2.5
 MAX_RISK = 3.00  # <-- Max $3.00 risk per 0.01 lot
+
+# ===== DERIV API ONLY CHANGE =====
+DERIV_TOKEN = os.environ.get("DERIV_TOKEN", "")  # From GitHub Secrets - NEVER paste token in code!
+APP_ID = 1089
+SYMBOL = "frxXAUUSD"  # Gold on Deriv - if no candles, change to "XAUUSD"
+# =================================
 
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -50,83 +57,65 @@ def get_lot(balance):
     lot = 2.0
   return lot
 
-def fetch_live_price():
-  """Get REAL live Gold price - NO delay, NO offset needed. Try 3 APIs."""
-  # API 1 - gold-api.com - FREE, no key
-  try:
-    r = requests.get("https://api.gold-api.com/price/XAU", timeout=6)
-    if r.status_code == 200:
-      price = r.json().get("price")
-      if price and 3000 < float(price) < 6000:
-        log_message(f"Live Price Source: gold-api.com = ${float(price):.2f}")
-        return float(price)
-  except Exception as e:
-    log_message(f"gold-api failed: {e}")
-  # API 2 - goldprice.org - FREE, no key
-  try:
-    r = requests.get("https://data-asg.goldprice.org/dbXRates/USD", timeout=6)
-    if r.status_code == 200:
-      items = r.json().get("items", [])
-      if items:
-        price = items[0].get("curr")
-        if price and 3000 < float(price) < 6000:
-          log_message(f"Live Price Source: goldprice.org = ${float(price):.2f}")
-          return float(price)
-  except Exception as e:
-    log_message(f"goldprice.org failed: {e}")
-  # API 3 - xaus.com - FREE, no key
-  try:
-    r = requests.get("https://xaus.com/api/v1/spot", timeout=6)
-    if r.status_code == 200:
-      price = r.json().get("spot_usd_oz") or r.json().get("price")
-      if price and 3000 < float(price) < 6000:
-        log_message(f"Live Price Source: xaus.com = ${float(price):.2f}")
-        return float(price)
-  except Exception as e:
-    log_message(f"xaus.com failed: {e}")
-  return None
-
-def fetch_yahoo_m5_data():
-  url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m"
-  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-  try:
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-    result = data.get("chart", {}).get("result")
-    if not result:
-      log_message("Invalid data structure received from Yahoo Finance.")
-      return [], [], [], [], []
-    indicators = result[0].get("indicators", {})
-    quote = indicators.get("quote", [{}])[0]
-    opens = quote.get("open", [])
-    highs = quote.get("high", [])
-    lows = quote.get("low", [])
-    closes = quote.get("close", [])
-    timestamps = result[0].get("timestamp", [])
-    valid_data = [(ts, o, h, l, c) for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes) if o is not None and h is not None and l is not None and c is not None]
-    if not valid_data:
-      return [], [], [], [], []
-    ts_list, o_list, h_list, l_list, c_list = zip(*valid_data)
-
-    # === AUTO-SYNC FIX - NO MORE HARDCODED -12.43 / -26! ===
-    # Yahoo is delayed 15 min, so we shift ALL Yahoo candles to match LIVE price
-    live_price = fetch_live_price()
-    if live_price is not None and len(c_list) > 0:
-      yahoo_last = c_list[-1]
-      auto_offset = live_price - yahoo_last
-      log_message(f"Auto-Sync: Live ${live_price:.2f} - Yahoo ${yahoo_last:.2f} = Offset {auto_offset:+.2f} applied to all candles")
-      o_list = [x + auto_offset for x in o_list]
-      h_list = [x + auto_offset for x in h_list]
-      l_list = [x + auto_offset for x in l_list]
-      c_list = [x + auto_offset for x in c_list]
-    else:
-      log_message("WARNING: Live price failed, using Yahoo raw (may be delayed)")
-
-    return list(ts_list), list(o_list), list(h_list), list(l_list), list(c_list)
-  except Exception as e:
-    log_message(f"Error fetching data: {e}")
+def fetch_deriv_m5_data():
+  """NEW: Get M5 candles DIRECT from Deriv API using your token - LIVE, NO delay!"""
+  if not DERIV_TOKEN:
+    log_message("ERROR: DERIV_TOKEN not found! Add it in GitHub Secrets!")
     return [], [], [], [], []
+
+  result = {"candles": None, "error": None, "authorized": False}
+
+  def on_message(ws, message):
+    data = json.loads(message)
+    if data.get("msg_type") == "authorize":
+      if data.get("error"):
+        result["error"] = data["error"]["message"]
+        log_message(f"Deriv Authorize FAILED: {data['error']['message']}")
+        ws.close()
+        return
+      result["authorized"] = True
+      log_message(f"Deriv Authorized: {data['authorize']['loginid']} Balance: ${data['authorize']['balance']}")
+      ws.send(json.dumps({"ticks_history": SYMBOL, "count": 100, "end": "latest", "granularity": 300, "style": "candles"}))
+    if data.get("msg_type") == "candles":
+      result["candles"] = data.get("candles", [])
+      ws.close()
+
+  def on_open(ws):
+    ws.send(json.dumps({"authorize": DERIV_TOKEN}))
+
+  def on_error(ws, err):
+    result["error"] = str(err)
+    log_message(f"Deriv WS Error: {err}")
+
+  try:
+    ws = websocket.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+      on_message=on_message, on_open=on_open, on_error=on_error)
+    ws.run_forever(ping_interval=20, ping_timeout=10)
+  except Exception as e:
+    log_message(f"Error fetching Deriv data: {e}")
+    return [], [], [], [], []
+
+  candles = result.get("candles")
+  if not candles:
+    log_message(f"Error: No candles from Deriv. Error: {result.get('error')} - Try SYMBOL = XAUUSD")
+    return [], [], [], [], []
+
+  # Convert Deriv format to same format as before: ts, open, high, low, close
+  ts_list = [c["epoch"] for c in candles]
+  o_list = [float(c["open"]) for c in candles]
+  h_list = [float(c["high"]) for c in candles]
+  l_list = [float(c["low"]) for c in candles]
+  c_list = [float(c["close"]) for c in candles]
+  log_message(f"Deriv Live: Got {len(c_list)} M5 candles for {SYMBOL} - Last Close ${c_list[-1]:.2f} - NO Yahoo delay!")
+  return ts_list, o_list, h_list, l_list, c_list
+
+# Keep old function name so rest of code doesn't change - it now calls Deriv!
+def fetch_yahoo_m5_data():
+  return fetch_deriv_m5_data()
+
+def fetch_live_price():
+  # No longer needed - Deriv candles are already LIVE. Kept so old code doesn't break.
+  return None
 
 def save_json_atomically(filename, data):
   dir_name = os.path.dirname(filename) or "."
