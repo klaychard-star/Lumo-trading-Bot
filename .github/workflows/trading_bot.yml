@@ -19,15 +19,17 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests websocket-client
 
       - name: Run LUMO Bot
+        env:
+          DERIV_TOKEN: ${{ secrets.DERIV_TOKEN }}
         run: python lumo_bot.py
 
       - name: Commit state updates
         run: |
           git config --global user.name "LUMO Bot"
           git config --global user.email "bot@lumo.com"
-          git add lumo_active_trades.json lumo_balance.json || true
+          git add lumo_active_trades.json lumo_balance.json lumo_live_log.txt || true
           git commit -m "Auto-update bot state" || true
           git push || true
