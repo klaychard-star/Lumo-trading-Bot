@@ -11,6 +11,7 @@ LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK + AUTO-SYNC
   TP      = 2.5 x Risk
   PRICE FIX: NOW USES DERIV API DIRECT - NO Yahoo, NO delay, NO offset!
   Token from GitHub Secrets -> DERIV_TOKEN
+  FIX: Tries 3 Deriv servers + Origin header to bypass Cloudflare 520!
 """
 
 from datetime import datetime, timezone
@@ -58,56 +59,67 @@ def get_lot(balance):
   return lot
 
 def fetch_deriv_m5_data():
-  """NEW: Get M5 candles DIRECT from Deriv API using your token - LIVE, NO delay!"""
+  """FIXED: Get M5 candles DIRECT from Deriv API - Tries 3 servers to bypass 520 error!"""
   if not DERIV_TOKEN:
     log_message("ERROR: DERIV_TOKEN not found! Add it in GitHub Secrets!")
     return [], [], [], [], []
 
-  result = {"candles": None, "error": None, "authorized": False}
+  # Try 3 Deriv servers - one will work!
+  ENDPOINTS = [
+    f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://ws.deriv.com/websockets/v3?app_id={APP_ID}",
+  ]
 
-  def on_message(ws, message):
-    data = json.loads(message)
-    if data.get("msg_type") == "authorize":
-      if data.get("error"):
-        result["error"] = data["error"]["message"]
-        log_message(f"Deriv Authorize FAILED: {data['error']['message']}")
+  for endpoint in ENDPOINTS:
+    log_message(f"Trying Deriv server: {endpoint}")
+    result = {"candles": None, "error": None}
+
+    def on_message(ws, message):
+      data = json.loads(message)
+      if data.get("msg_type") == "authorize":
+        if data.get("error"):
+          result["error"] = data["error"]["message"]
+          log_message(f"Deriv Authorize FAILED: {data['error']['message']}")
+          ws.close()
+          return
+        log_message(f"Deriv Authorized: {data['authorize']['loginid']} Balance: ${data['authorize']['balance']}")
+        ws.send(json.dumps({"ticks_history": SYMBOL, "count": 100, "end": "latest", "granularity": 300, "style": "candles"}))
+      if data.get("msg_type") == "candles":
+        result["candles"] = data.get("candles", [])
         ws.close()
-        return
-      result["authorized"] = True
-      log_message(f"Deriv Authorized: {data['authorize']['loginid']} Balance: ${data['authorize']['balance']}")
-      ws.send(json.dumps({"ticks_history": SYMBOL, "count": 100, "end": "latest", "granularity": 300, "style": "candles"}))
-    if data.get("msg_type") == "candles":
-      result["candles"] = data.get("candles", [])
-      ws.close()
 
-  def on_open(ws):
-    ws.send(json.dumps({"authorize": DERIV_TOKEN}))
+    def on_open(ws):
+      ws.send(json.dumps({"authorize": DERIV_TOKEN}))
 
-  def on_error(ws, err):
-    result["error"] = str(err)
-    log_message(f"Deriv WS Error: {err}")
+    def on_error(ws, err):
+      result["error"] = str(err)
+      log_message(f"Deriv WS Error on {endpoint}: {err}")
 
-  try:
-    ws = websocket.WebSocketApp(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
-      on_message=on_message, on_open=on_open, on_error=on_error)
-    ws.run_forever(ping_interval=20, ping_timeout=10)
-  except Exception as e:
-    log_message(f"Error fetching Deriv data: {e}")
-    return [], [], [], [], []
+    try:
+      ws = websocket.WebSocketApp(endpoint,
+        on_message=on_message, on_open=on_open, on_error=on_error,
+        header={"Origin": "https://deriv.com", "User-Agent": "Mozilla/5.0"})
+      ws.run_forever(ping_interval=20, ping_timeout=10)
+    except Exception as e:
+      log_message(f"Error on {endpoint}: {e}")
+      continue
 
-  candles = result.get("candles")
-  if not candles:
-    log_message(f"Error: No candles from Deriv. Error: {result.get('error')} - Try SYMBOL = XAUUSD")
-    return [], [], [], [], []
+    candles = result.get("candles")
+    if candles and len(candles) >= 100:
+      ts_list = [c["epoch"] for c in candles]
+      o_list = [float(c["open"]) for c in candles]
+      h_list = [float(c["high"]) for c in candles]
+      l_list = [float(c["low"]) for c in candles]
+      c_list = [float(c["close"]) for c in candles]
+      log_message(f"Deriv Live SUCCESS via {endpoint}: Got {len(c_list)} M5 candles - Last Close ${c_list[-1]:.2f}")
+      return ts_list, o_list, h_list, l_list, c_list
+    else:
+      log_message(f"Failed on {endpoint}, trying next server...")
+      continue
 
-  # Convert Deriv format to same format as before: ts, open, high, low, close
-  ts_list = [c["epoch"] for c in candles]
-  o_list = [float(c["open"]) for c in candles]
-  h_list = [float(c["high"]) for c in candles]
-  l_list = [float(c["low"]) for c in candles]
-  c_list = [float(c["close"]) for c in candles]
-  log_message(f"Deriv Live: Got {len(c_list)} M5 candles for {SYMBOL} - Last Close ${c_list[-1]:.2f} - NO Yahoo delay!")
-  return ts_list, o_list, h_list, l_list, c_list
+  log_message("Error: All 3 Deriv servers failed - Try SYMBOL = XAUUSD")
+  return [], [], [], [], []
 
 # Keep old function name so rest of code doesn't change - it now calls Deriv!
 def fetch_yahoo_m5_data():
