@@ -1,5 +1,5 @@
 """
-LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK
+LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK + AUTO-SYNC
   OPEN trades close ANYTIME (even night/weekend)
   NEW trades ONLY 06:00-18:00 London, weekdays
   NEW RULE: If Risk > $3.00 per 0.01 lot -> SKIP TRADE (C1 too big!)
@@ -9,6 +9,8 @@ LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK
   BUY SL  = C1 Low - $0.50  (OUTSIDE C1 - BELOW)
   SELL SL = C1 High + $0.50 (OUTSIDE C1 - ABOVE)
   TP      = 2.5 x Risk
+  PRICE FIX: Auto-Offset - Yahoo candles shifted to LIVE price every run!
+  NO MORE -12.43 / -26 MANUAL FIX!
 """
 
 from datetime import datetime, timezone
@@ -28,7 +30,7 @@ SL_PIPS = 5
 PIP_VALUE = 0.10
 SL_OFFSET = SL_PIPS * PIP_VALUE  # 5 pips = $0.50
 TP_MULTIPLIER = 2.5
-MAX_RISK = 3.00  # <-- NEW! Max $3.00 risk per 0.01 lot
+MAX_RISK = 3.00  # <-- Max $3.00 risk per 0.01 lot
 
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -48,11 +50,47 @@ def get_lot(balance):
     lot = 2.0
   return lot
 
+def fetch_live_price():
+  """Get REAL live Gold price - NO delay, NO offset needed. Try 3 APIs."""
+  # API 1 - gold-api.com - FREE, no key
+  try:
+    r = requests.get("https://api.gold-api.com/price/XAU", timeout=6)
+    if r.status_code == 200:
+      price = r.json().get("price")
+      if price and 3000 < float(price) < 6000:
+        log_message(f"Live Price Source: gold-api.com = ${float(price):.2f}")
+        return float(price)
+  except Exception as e:
+    log_message(f"gold-api failed: {e}")
+  # API 2 - goldprice.org - FREE, no key
+  try:
+    r = requests.get("https://data-asg.goldprice.org/dbXRates/USD", timeout=6)
+    if r.status_code == 200:
+      items = r.json().get("items", [])
+      if items:
+        price = items[0].get("curr")
+        if price and 3000 < float(price) < 6000:
+          log_message(f"Live Price Source: goldprice.org = ${float(price):.2f}")
+          return float(price)
+  except Exception as e:
+    log_message(f"goldprice.org failed: {e}")
+  # API 3 - xaus.com - FREE, no key
+  try:
+    r = requests.get("https://xaus.com/api/v1/spot", timeout=6)
+    if r.status_code == 200:
+      price = r.json().get("spot_usd_oz") or r.json().get("price")
+      if price and 3000 < float(price) < 6000:
+        log_message(f"Live Price Source: xaus.com = ${float(price):.2f}")
+        return float(price)
+  except Exception as e:
+    log_message(f"xaus.com failed: {e}")
+  return None
+
 def fetch_yahoo_m5_data():
   url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m"
   headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
   try:
-    response = requests.get(url, headers=headers, timeout=5)
+    response = requests.get(url, headers=headers, timeout=10)
     response.raise_for_status()
     data = response.json()
     result = data.get("chart", {}).get("result")
@@ -70,10 +108,21 @@ def fetch_yahoo_m5_data():
     if not valid_data:
       return [], [], [], [], []
     ts_list, o_list, h_list, l_list, c_list = zip(*valid_data)
-    o_list = [x - 12.43 for x in o_list]
-    h_list = [x - 12.43 for x in h_list]
-    l_list = [x - 12.43 for x in l_list]
-    c_list = [x - 12.43 for x in c_list]
+
+    # === AUTO-SYNC FIX - NO MORE HARDCODED -12.43 / -26! ===
+    # Yahoo is delayed 15 min, so we shift ALL Yahoo candles to match LIVE price
+    live_price = fetch_live_price()
+    if live_price is not None and len(c_list) > 0:
+      yahoo_last = c_list[-1]
+      auto_offset = live_price - yahoo_last
+      log_message(f"Auto-Sync: Live ${live_price:.2f} - Yahoo ${yahoo_last:.2f} = Offset {auto_offset:+.2f} applied to all candles")
+      o_list = [x + auto_offset for x in o_list]
+      h_list = [x + auto_offset for x in h_list]
+      l_list = [x + auto_offset for x in l_list]
+      c_list = [x + auto_offset for x in c_list]
+    else:
+      log_message("WARNING: Live price failed, using Yahoo raw (may be delayed)")
+
     return list(ts_list), list(o_list), list(h_list), list(l_list), list(c_list)
   except Exception as e:
     log_message(f"Error fetching data: {e}")
@@ -120,8 +169,6 @@ def run_single_check():
   except Exception:
     dt_london = now_utc
 
-  # === FIXED: DO NOT EXIT HERE ANYMORE! ===
-  # We need to still manage OPEN trades even outside London hours!
   is_weekend = now_utc.weekday() >= 5
   is_london_hours = (6 <= dt_london.hour <= 18)
   can_take_new_trade = (not is_weekend) and is_london_hours
@@ -212,7 +259,7 @@ def run_single_check():
         risk = sl_price - entry_price
         tp_price = entry_price - (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
     if side and entry_price is not None:
-      # === NEW: $3.00 MAX RISK RULE - SKIP IF C1 TOO BIG! ===
+      # === $3.00 MAX RISK RULE - SKIP IF C1 TOO BIG! ===
       if risk is not None and risk > MAX_RISK:
         log_message(f"SKIP {side}: Risk ${risk:.2f} > ${MAX_RISK:.2f} max per 0.01 lot - C1 too big! Entry ${entry_price:.2f} SL ${sl_price:.2f}")
       else:
