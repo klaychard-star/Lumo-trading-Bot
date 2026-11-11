@@ -19,11 +19,9 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests websocket-client
+        run: pip install requests
 
       - name: Run LUMO Bot
-        env:
-          DERIV_TOKEN: ${{ secrets.DERIV_TOKEN }}
         run: python lumo_bot.py
 
       - name: Commit state updates
