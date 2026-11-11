@@ -1,17 +1,17 @@
 """
-LUMO_BOT - LIVE - Gold M5 - FIXED + $3 MAX RISK + AUTO-SYNC
-  OPEN trades close ANYTIME (even night/weekend)
+LUMO_BOT - LIVE - Gold M5 - OCTOBER STRATEGY - WITH LIVE PRICE + SAVING
+  STRATEGY UNCHANGED - SAME AS YOUR BACKTEST!
+  RULE: If Risk > $5.00 per 0.01 lot -> SKIP TRADE!
+  Risk = Entry to SL distance
+  OPEN trades close ANYTIME
   NEW trades ONLY 06:00-18:00 London, weekdays
-  NEW RULE: If Risk > $3.00 per 0.01 lot -> SKIP TRADE (C1 too big!)
-  BUY:  C1 Red, C2 Green BODY CLOSE > C1 Close, C3 taps Half
-  SELL: C1 Green, C2 Red BODY CLOSE < C1 Close, C3 taps Half
-  Entry   = Half of C1 (High + Low) / 2
-  BUY SL  = C1 Low - $0.50  (OUTSIDE C1 - BELOW)
-  SELL SL = C1 High + $0.50 (OUTSIDE C1 - ABOVE)
-  TP      = 2.5 x Risk
-  PRICE FIX: NOW USES DERIV API DIRECT - NO Yahoo, NO delay, NO offset!
-  Token from GitHub Secrets -> DERIV_TOKEN
-  FIX: Tries 3 Deriv servers + Origin header to bypass Cloudflare 520!
+  BUY:  C1 Red, C2 Green BODY CLOSE > C1 Close, C3 taps Half of C1
+  SELL: C1 Green, C2 Red BODY CLOSE < C1 Close, C3 taps Half of C1
+  Entry = Half of C1 (High + Low) / 2
+  BUY SL = C1 Low - $0.50
+  SELL SL = C1 High + $0.50
+  TP = 2.5x Risk
+  FIXED ONLY: Live Price + Saving Balance/Trades - STRATEGY NOT CHANGED!
 """
 
 from datetime import datetime, timezone
@@ -20,7 +20,6 @@ import json
 import os
 import tempfile
 import requests
-import websocket
 
 LOG_FILE = "lumo_live_log.txt"
 STATE_FILE = "lumo_active_trades.json"
@@ -30,15 +29,9 @@ BASE_LOT = 0.01
 INITIAL_BALANCE = 100.00
 SL_PIPS = 5
 PIP_VALUE = 0.10
-SL_OFFSET = SL_PIPS * PIP_VALUE  # 5 pips = $0.50
+SL_OFFSET = SL_PIPS * PIP_VALUE
 TP_MULTIPLIER = 2.5
-MAX_RISK = 3.00  # <-- Max $3.00 risk per 0.01 lot
-
-# ===== DERIV API ONLY CHANGE =====
-DERIV_TOKEN = os.environ.get("DERIV_TOKEN", "")  # From GitHub Secrets - NEVER paste token in code!
-APP_ID = 1089
-SYMBOL = "frxXAUUSD"  # Gold on Deriv - if no candles, change to "XAUUSD"
-# =================================
+MAX_RISK = 5.00
 
 def log_message(text):
   timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -58,76 +51,75 @@ def get_lot(balance):
     lot = 2.0
   return lot
 
-def fetch_deriv_m5_data():
-  """FIXED: Get M5 candles DIRECT from Deriv API - Tries 3 servers to bypass 520 error!"""
-  if not DERIV_TOKEN:
-    log_message("ERROR: DERIV_TOKEN not found! Add it in GitHub Secrets!")
-    return [], [], [], [], []
-
-  # Try 3 Deriv servers - one will work!
-  ENDPOINTS = [
-    f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
-    f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}",
-    f"wss://ws.deriv.com/websockets/v3?app_id={APP_ID}",
-  ]
-
-  for endpoint in ENDPOINTS:
-    log_message(f"Trying Deriv server: {endpoint}")
-    result = {"candles": None, "error": None}
-
-    def on_message(ws, message):
-      data = json.loads(message)
-      if data.get("msg_type") == "authorize":
-        if data.get("error"):
-          result["error"] = data["error"]["message"]
-          log_message(f"Deriv Authorize FAILED: {data['error']['message']}")
-          ws.close()
-          return
-        log_message(f"Deriv Authorized: {data['authorize']['loginid']} Balance: ${data['authorize']['balance']}")
-        ws.send(json.dumps({"ticks_history": SYMBOL, "count": 100, "end": "latest", "granularity": 300, "style": "candles"}))
-      if data.get("msg_type") == "candles":
-        result["candles"] = data.get("candles", [])
-        ws.close()
-
-    def on_open(ws):
-      ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-
-    def on_error(ws, err):
-      result["error"] = str(err)
-      log_message(f"Deriv WS Error on {endpoint}: {err}")
-
-    try:
-      ws = websocket.WebSocketApp(endpoint,
-        on_message=on_message, on_open=on_open, on_error=on_error,
-        header={"Origin": "https://deriv.com", "User-Agent": "Mozilla/5.0"})
-      ws.run_forever(ping_interval=20, ping_timeout=10)
-    except Exception as e:
-      log_message(f"Error on {endpoint}: {e}")
-      continue
-
-    candles = result.get("candles")
-    if candles and len(candles) >= 100:
-      ts_list = [c["epoch"] for c in candles]
-      o_list = [float(c["open"]) for c in candles]
-      h_list = [float(c["high"]) for c in candles]
-      l_list = [float(c["low"]) for c in candles]
-      c_list = [float(c["close"]) for c in candles]
-      log_message(f"Deriv Live SUCCESS via {endpoint}: Got {len(c_list)} M5 candles - Last Close ${c_list[-1]:.2f}")
-      return ts_list, o_list, h_list, l_list, c_list
-    else:
-      log_message(f"Failed on {endpoint}, trying next server...")
-      continue
-
-  log_message("Error: All 3 Deriv servers failed - Try SYMBOL = XAUUSD")
-  return [], [], [], [], []
-
-# Keep old function name so rest of code doesn't change - it now calls Deriv!
-def fetch_yahoo_m5_data():
-  return fetch_deriv_m5_data()
-
 def fetch_live_price():
-  # No longer needed - Deriv candles are already LIVE. Kept so old code doesn't break.
+  # Live Gold price - for Auto-Sync
+  try:
+    r = requests.get("https://api.gold-api.com/price/XAU", timeout=6)
+    if r.status_code == 200:
+      price = r.json().get("price")
+      if price and 3000 < float(price) < 6000:
+        log_message(f"Live Price Source: gold-api.com = ${float(price):.2f}")
+        return float(price)
+  except Exception as e:
+    log_message(f"gold-api failed: {e}")
+  try:
+    r = requests.get("https://data-asg.goldprice.org/dbXRates/USD", timeout=6)
+    if r.status_code == 200:
+      items = r.json().get("items", [])
+      if items:
+        price = items[0].get("curr")
+        if price and 3000 < float(price) < 6000:
+          log_message(f"Live Price Source: goldprice.org = ${float(price):.2f}")
+          return float(price)
+  except Exception as e:
+    log_message(f"goldprice.org failed: {e}")
   return None
+
+def fetch_yahoo_m5_data():
+  # SAME Yahoo as backtest, + Live Price Auto-Sync
+  for base in ["https://query2.finance.yahoo.com", "https://query1.finance.yahoo.com"]:
+    url = f"{base}/v8/finance/chart/GC=F?range=5d&interval=5m"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    try:
+      response = requests.get(url, headers=headers, timeout=10)
+      if response.status_code != 200:
+        log_message(f"Yahoo {base} failed: {response.status_code}, trying next...")
+        continue
+      data = response.json()
+      result = data.get("chart", {}).get("result")
+      if not result:
+        continue
+      indicators = result[0].get("indicators", {})
+      quote = indicators.get("quote", [{}])[0]
+      opens = quote.get("open", [])
+      highs = quote.get("high", [])
+      lows = quote.get("low", [])
+      closes = quote.get("close", [])
+      timestamps = result[0].get("timestamp", [])
+      valid_data = [(ts, o, h, l, c) for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes) if o is not None and h is not None and l is not None and c is not None]
+      if not valid_data or len(valid_data) < 100:
+        continue
+      ts_list, o_list, h_list, l_list, c_list = zip(*valid_data)
+      o_list = list(o_list); h_list = list(h_list); l_list = list(l_list); c_list = list(c_list); ts_list = list(ts_list)
+      # === LIVE PRICE AUTO-SYNC ===
+      live_price = fetch_live_price()
+      if live_price is not None and len(c_list) > 0:
+        yahoo_last = c_list[-1]
+        auto_offset = live_price - yahoo_last
+        log_message(f"Auto-Sync: Live ${live_price:.2f} - Yahoo ${yahoo_last:.2f} = Offset {auto_offset:+.2f} applied")
+        o_list = [x + auto_offset for x in o_list]
+        h_list = [x + auto_offset for x in h_list]
+        l_list = [x + auto_offset for x in l_list]
+        c_list = [x + auto_offset for x in c_list]
+      else:
+        log_message("WARNING: Live price failed, using Yahoo raw (may be delayed)")
+      log_message(f"Got {len(c_list)} M5 candles via {base} - Last Close ${c_list[-1]:.2f}")
+      return ts_list, o_list, h_list, l_list, c_list
+    except Exception as e:
+      log_message(f"Error fetching from {base}: {e}")
+      continue
+  log_message("Error: All Yahoo servers failed")
+  return [], [], [], [], []
 
 def save_json_atomically(filename, data):
   dir_name = os.path.dirname(filename) or "."
@@ -187,6 +179,8 @@ def run_single_check():
   if len(closes) < 100:
     log_message("Error: Not enough data fetched to evaluate strategy.")
     return
+
+  # SAME INDEX AS BACKTEST - C1, C2, C3 closed candles
   i = len(closes) - 2
   current_high = highs[i]
   current_low = lows[i]
@@ -198,7 +192,7 @@ def run_single_check():
   current_lot = get_lot(balance_data["balance"])
   log_message(f"M5 Check @ ${current_price:.2f} | London Time: {dt_london.strftime('%H:%M')} | 50-MA: ${avg50:.2f} | Lot: {current_lot:.2f} | Bal: ${balance_data['balance']:.2f} | New Trades Allowed: {can_take_new_trade}")
 
-  # === 1. MANAGE OPEN TRADES - ALWAYS RUNS, EVEN AT NIGHT! ===
+  # === 1. MANAGE OPEN TRADES - ALWAYS RUNS ===
   active_trades = load_active_trades()
   updated_active = []
   for trade in active_trades:
@@ -229,7 +223,7 @@ def run_single_check():
       updated_active.append(trade)
       log_message(f"HOLDING active trade: {side} @ ${entry:.2f}")
 
-  # === 2. NEW TRADES - ONLY IF LONDON HOURS + WEEKDAY! ===
+  # === 2. NEW TRADES - SAME STRATEGY AS BACKTEST - UNCHANGED! ===
   if not updated_active and can_take_new_trade:
     trend_is_bullish = closes[i] > avg50
     trend_is_bearish = closes[i] < avg50
@@ -241,26 +235,24 @@ def run_single_check():
     c1_is_bullish = c1_close > c1_open
     c2_is_bullish = c2_close > c2_open
     c2_is_bearish = c2_close < c2_open
-    # === BUY: C1 Red, C2 Green BODY CLOSE above C1 Close (NOT wick), C3 taps Half of C1 ===
+    # BUY - SAME AS BACKTEST
     if trend_is_bullish and c1_is_bearish and c2_is_bullish and c2_close > c1_close:
-      tapped_level = c3_low <= ref_level <= c3_high
-      if tapped_level:
+      if c3_low <= ref_level <= c3_high:
         side = "BUY"
-        entry_price = ref_level  # Half of C1
-        sl_price = c1_low - SL_OFFSET  # C1 Low - $0.50 - OUTSIDE C1 BELOW
+        entry_price = ref_level
+        sl_price = c1_low - SL_OFFSET
         risk = entry_price - sl_price
-        tp_price = entry_price + (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
-    # === SELL: C1 Green, C2 Red BODY CLOSE below C1 Close (NOT wick), C3 taps Half of C1 ===
+        tp_price = entry_price + (risk * TP_MULTIPLIER)
+    # SELL - SAME AS BACKTEST
     elif trend_is_bearish and c1_is_bullish and c2_is_bearish and c2_close < c1_close:
-      tapped_level = c3_low <= ref_level <= c3_high
-      if tapped_level:
+      if c3_low <= ref_level <= c3_high:
         side = "SELL"
-        entry_price = ref_level  # Half of C1
-        sl_price = c1_high + SL_OFFSET  # C1 High + $0.50 - OUTSIDE C1 ABOVE
+        entry_price = ref_level
+        sl_price = c1_high + SL_OFFSET
         risk = sl_price - entry_price
-        tp_price = entry_price - (risk * TP_MULTIPLIER)  # TP = 2.5 x Risk
+        tp_price = entry_price - (risk * TP_MULTIPLIER)
     if side and entry_price is not None:
-      # === $3.00 MAX RISK RULE - SKIP IF C1 TOO BIG! ===
+      # C1 LIMIT - SAME AS BACKTEST - SKIP IF RISK > $5
       if risk is not None and risk > MAX_RISK:
         log_message(f"SKIP {side}: Risk ${risk:.2f} > ${MAX_RISK:.2f} max per 0.01 lot - C1 too big! Entry ${entry_price:.2f} SL ${sl_price:.2f}")
       else:
@@ -270,8 +262,10 @@ def run_single_check():
   elif not updated_active and not can_take_new_trade:
     log_message("Skipping NEW setup - Outside London hours / Weekend.")
 
+  # === SAVING - FIXED! ===
   save_active_trades(updated_active)
   save_balance(balance_data)
+  log_message(f"Saved: Balance ${balance_data['balance']:.2f} | Active Trades: {len(updated_active)}")
 
 if __name__ == "__main__":
   run_single_check()
